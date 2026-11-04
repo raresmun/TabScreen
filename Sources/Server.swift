@@ -22,6 +22,8 @@ final class StreamServer: EncodedFrameSink, @unchecked Sendable {
     var onViewerCountChange: (@Sendable (Int) -> Void)?
     var onJPEGDemandChange: (@Sendable (Bool) -> Void)?
     var onJPEGNeeded: (@Sendable () -> Void)?
+    /// A viewer described its screen (in its "hello"): the extra display can be shaped to fit it.
+    var onDeviceScreen: (@Sendable (DeviceScreen) -> Void)?
 
     private let port: UInt16
     private let html: Data
@@ -324,6 +326,7 @@ final class StreamServer: EncodedFrameSink, @unchecked Sendable {
                     Log.write("Tablet browser: \(message["ua"] ?? "?") – secure page: \(message["secure"] ?? "?")")
                     Log.write("Tablet screen: \(message["w"] ?? "?") x \(message["h"] ?? "?") pixels – \(pictureMode ? "picture mode (plain Wi-Fi page)" : "video mode")")
                 }
+                if let screen = DeviceScreen(hello: message) { onDeviceScreen?(screen) }
                 if pictureMode {
                     client.wantsJPEG = true
                     updateJPEGDemand()
