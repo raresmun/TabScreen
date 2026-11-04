@@ -79,7 +79,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         server.onKeyFrameNeeded = { [weak capturer] in
             capturer?.resendLastFrame(asKeyFrame: true)
         }
-        server.onViewerCountChange = { count in
+        server.onViewerCountChange = { [weak capturer] count in
+            capturer?.setVideoWanted(count > 0)
             Task { @MainActor in self.viewerCountChanged(count) }
         }
         capturer.onError = { message in

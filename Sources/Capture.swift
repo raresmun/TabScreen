@@ -193,6 +193,7 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     private var sharpenPasses = 0
     private var idleTimer: DispatchSourceTimer?
     private var jpegWanted = false
+    private var videoWanted = false   // on while a tablet is watching (see setVideoWanted)
     private var lastJPEGTime = Date.distantPast
     private var sharpJPEGSent = true
 
@@ -266,6 +267,12 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         }
     }
 
+    /// Turns video encoding on or off: no need to encode (and use battery) while no tablet is watching.
+    /// When a tablet connects it asks for a key frame, which encodes the latest picture right away.
+    func setVideoWanted(_ wanted: Bool) {
+        queue.async { self.videoWanted = wanted }
+    }
+
     /// Turns JPEG pictures on or off (only needed while a browser without video decoding is connected).
     func setJPEGWanted(_ wanted: Bool) {
         queue.async { self.jpegWanted = wanted }
@@ -288,7 +295,7 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             guard let self = self, let buffer = self.lastBuffer else { return }
             let idle = Date().timeIntervalSince(self.lastFrameTime)
             // When the picture stops changing, send it again in higher quality so text ends up crisp.
-            if self.sharpenPasses < 2 && idle > 0.15 {
+            if self.videoWanted && self.sharpenPasses < 2 && idle > 0.15 {
                 self.sharpenPasses += 1
                 self.encoder.encode(buffer)
             }
@@ -312,7 +319,7 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         lastBuffer = pixelBuffer
         lastFrameTime = Date()
         sharpenPasses = 0
-        encoder.encode(pixelBuffer)
+        if videoWanted { encoder.encode(pixelBuffer) }
         if jpegWanted {
             sharpJPEGSent = false
             if lastFrameTime.timeIntervalSince(lastJPEGTime) >= 1.0 / 60 {
