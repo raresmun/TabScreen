@@ -1,52 +1,41 @@
 import Foundation
 import CoreGraphics
 
-/// The extra monitor macOS sees. It exists as long as this object (and the app) is alive.
+/// The extra monitor macOS sees, shaped like the connected device's screen.
+/// It exists as long as this object holds it.
 final class VirtualScreen {
-    struct Preset {
-        let title: String
-        let pointsWide: Int
-    }
-
-    /// "Looks like" sizes for the 10.9" tablet, all rendered sharp (HiDPI).
-    static let presets: [Preset] = [
-        Preset(title: "Same size as your MacBook (1152 × 720)", pointsWide: 1152),
-        Preset(title: "More space (1280 × 800)", pointsWide: 1280),
-        Preset(title: "Most space (1440 × 900)", pointsWide: 1440),
-    ]
-
     private var display: TSVirtualDisplay?
 
     var displayID: CGDirectDisplayID { display?.displayID ?? 0 }
 
-    func create() -> Bool {
-        // Try 90 Hz first (the tablet's refresh rate); fall back to 60 Hz if macOS refuses.
-        for rates in [[90.0, 60.0], [60.0]] {
-            if let newDisplay = makeDisplay(refreshRates: rates) {
+    func create(for screen: DeviceScreen) -> Bool {
+        // Try the device's refresh rate first; fall back to 60 Hz if macOS refuses.
+        let fps = screen.video.fps
+        let attempts: [[Double]] = fps == 60 ? [[60]] : [[Double(fps), 60], [60]]
+        for refreshRates in attempts {
+            if let newDisplay = makeDisplay(for: screen, refreshRates: refreshRates) {
                 display = newDisplay
-                Log.write("Virtual display created (id \(newDisplay.displayID), up to \(Int(rates[0])) Hz)")
+                Log.write("Extra display created for \(screen.name) (id \(newDisplay.displayID), up to \(Int(refreshRates[0])) Hz)")
                 return true
             }
         }
-        Log.write("Creating the virtual display failed")
+        Log.write("Creating the extra display failed")
         return false
     }
 
-    private func makeDisplay(refreshRates: [Double]) -> TSVirtualDisplay? {
-        // Pixel sizes and point sizes are both listed so macOS can build the sharp (HiDPI) modes.
-        let sizes: [NSSize] = [
-            NSSize(width: 2880, height: 1800), NSSize(width: 2560, height: 1600), NSSize(width: 2304, height: 1440),
-            NSSize(width: 1440, height: 900), NSSize(width: 1280, height: 800), NSSize(width: 1152, height: 720),
-        ]
+    private func makeDisplay(for screen: DeviceScreen, refreshRates: [Double]) -> TSVirtualDisplay? {
+        let modes = screen.displayModes
+        let maxWidth = modes.map { Int($0.width) }.max() ?? screen.pixelWidth
+        let maxHeight = modes.map { Int($0.height) }.max() ?? screen.pixelHeight
         return TSVirtualDisplay(
-            name: "Galaxy Tab",
-            maxPixelsWide: 2880,
-            maxPixelsHigh: 1800,
-            sizeInMillimeters: CGSize(width: 235, height: 147),   // 10.9" 16:10 panel
-            modes: sizes.map { NSValue(size: $0) },
+            name: screen.name,
+            maxPixelsWide: UInt32(maxWidth),
+            maxPixelsHigh: UInt32(maxHeight),
+            sizeInMillimeters: screen.physicalSizeMM,
+            modes: modes.map { NSValue(size: $0) },
             hiDPI: true,
             refreshRates: refreshRates.map { NSNumber(value: $0) },
-            serialNum: 1
+            serialNum: screen.serialNumber
         )
     }
 
@@ -54,7 +43,7 @@ final class VirtualScreen {
         display = nil
     }
 
-    /// Switches the display to the sharp mode that "looks like" `pointsWide` wide.
+    /// Switches the display to the sharp (HiDPI) mode that "looks like" `pointsWide` wide.
     /// Returns false while macOS is still setting the display up.
     func apply(pointsWide: Int) -> Bool {
         let id = displayID
@@ -64,8 +53,6 @@ final class VirtualScreen {
             Log.write("Display modes not ready yet")
             return false
         }
-        let modeList = modes.map { "\($0.width)x\($0.height)[\($0.pixelWidth)x\($0.pixelHeight)]" }
-        Log.write("Available modes: " + modeList.joined(separator: " "))
         let sameWidth = modes.filter { $0.width == pointsWide }
         let closest = modes.min { abs($0.width - pointsWide) < abs($1.width - pointsWide) }
         let sharp = sameWidth.filter { $0.pixelWidth == pointsWide * 2 }
