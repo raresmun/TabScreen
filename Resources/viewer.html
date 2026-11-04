@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="theme-color" content="#000000">
+<title>TabScreen</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; touch-action: none; -webkit-user-select: none; user-select: none; }
+  canvas, video { position: fixed; left: 0; top: 0; }
+  video { display: none; background: #000; object-fit: fill; }
+  #pointer { position: fixed; left: 0; top: 0; display: none; pointer-events: none; z-index: 5; background-repeat: no-repeat; background-size: 100% 100%; will-change: transform; }
+  #hint { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(80vw, 640px); color: #bbb; font: 18px/1.6 system-ui, -apple-system, Roboto, sans-serif; text-align: center; pointer-events: none; }
+  #hint b { color: #fff; }
+  #keyform { position: fixed; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 24px; background: #000; color: #ccc; font: 18px/1.5 system-ui, -apple-system, Roboto, sans-serif; text-align: center; z-index: 10; }
+  #keyform input { font-size: 24px; padding: 10px; width: 9em; text-align: center; border-radius: 10px; border: 1px solid #555; background: #111; color: #fff; }
+  #keyform button { font-size: 20px; padding: 11px 22px; border-radius: 10px; border: 0; background: #2b6cff; color: #fff; }
+  #badge { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); padding: 10px 18px; border-radius: 999px; background: rgba(50, 50, 50, 0.85); color: #fff; font: 15px system-ui, -apple-system, Roboto, sans-serif; pointer-events: none; transition: opacity 0.4s; }
+</style>
+</head>
+<body>
+<video id="video" muted autoplay playsinline></video>
+<canvas id="screen"></canvas>
+<div id="pointer"></div>
+<div id="hint">Connecting to your Mac…</div>
+<div id="badge">Tap anywhere for full screen</div>
+<form id="keyform"><div id="keymsg"></div><input id="keyinput" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" placeholder="access key"><button type="submit">Connect</button></form>
+<script>
+(() => {
+  'use strict';
+  const canvas = document.getElementById('screen');
+  const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+  const hint = document.getElementById('hint');
+  const badge = document.getElementById('badge');
+  // The access key comes from the address (?k=...); remember it so reconnects and bookmarks keep working.
+  let accessKey = new URLSearchParams(location.search).get('k') || '';
+  try {
+    if (accessKey) localStorage.setItem('tabscreenKey', accessKey);
+    else accessKey = localStorage.getItem('tabscreenKey') || '';
+  } catch (e) { /* storage not available */ }
+
+  let socket = null;
+  let decoder = null;
+  let streamConfig = null;
+  let ready = false;          // decoder is configured
+  let waitingForKey = true;   // skip delta frames until a key frame arrives
+  let wakeLock = null;
+  let replaced = false;       // another tab took over the stream
+  let surfaceWidth = 0, surfaceHeight = 0;
+
+  // The Mac sends where the mouse is; the tablet draws the pointer itself so it moves instantly.
+  const pointer = document.getElementById('pointer');
+  const arrow = '<svg xmlns="http://www.w3.org/2000/svg" width="17" height="25" viewBox="0 0 17 25">' +
+    '<path d="M1.5 1.5 L1.5 20 L6 15.8 L9.2 23.2 L12.2 21.9 L9 14.6 L15 14.6 Z" fill="black" stroke="white" stroke-width="1.5" stroke-linejoin="round"/></svg>';
+  let pointerLook = { url: 'data:image/svg+xml;utf8,' + encodeURIComponent(arrow), hx: 1.5, hy: 1.5, w: 17, h: 25 };
+  let pointerAt = null;
+  pointer.style.backgroundImage = 'url("' + pointerLook.url + '")';
+
+  function setHint(html) {
+    hint.innerHTML = html;
+    hint.style.display = html ? 'block' : 'none';
+  }
+
+  // Video (sharpest, least lag) needs a "secure" page: USB/localhost, or the Chrome flag.
+  // On a plain Wi-Fi address TabScreen sends pictures instead, which works in any browser.
+  const videoMode = 'VideoDecoder' in window;
+
+  // Fast path: decoded frames go straight into a <video> element, which Chrome shows with less work than a canvas.
+  // (A playing video also helps keep the tablet's screen awake.)
+  const video = document.getElementById('video');
+  let frameWriter = null;
+  if (videoMode && 'MediaStreamTrackGenerator' in window) {
+    try {
+      const generator = new MediaStreamTrackGenerator({ kind: 'video' });
+      frameWriter = generator.writable.getWriter();
+      video.srcObject = new MediaStream([generator]);
+      video.play().catch(() => {});
+      video.style.display = 'block';
+      canvas.style.display = 'none';
+    } catch (e) { frameWriter = null; }
+  }
+  const surface = frameWriter ? video : canvas;   // the element that shows your screen
+
+  // Fit the picture to the tablet screen, keeping its shape.
+  function layout() {
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const ratio = surfaceWidth && surfaceHeight ? surfaceWidth / surfaceHeight : 16 / 10;
+    let w = vw, h = vw / ratio;
+    if (h > vh) { h = vh; w = vh * ratio; }
+    surface.style.width = w + 'px';
+    surface.style.height = h + 'px';
+    surface.style.left = (vw - w) / 2 + 'px';
+    surface.style.top = (vh - h) / 2 + 'px';
+    placePointer();
+  }
+
+  function placePointer() {
+    if (!pointerAt || !pointerAt.v) { pointer.style.display = 'none'; return; }
+    const r = surface.getBoundingClientRect();
+    const scale = r.width / (pointerAt.dw || 1152);
+    pointer.style.width = pointerLook.w * scale + 'px';
+    pointer.style.height = pointerLook.h * scale + 'px';
+    const left = r.left + pointerAt.x * r.width - pointerLook.hx * scale;
+    const top = r.top + pointerAt.y * r.height - pointerLook.hy * scale;
+    pointer.style.transform = 'translate(' + left + 'px, ' + top + 'px)';
+    pointer.style.display = 'block';
+  }
+  window.addEventListener('resize', layout);
+  layout();
+
+  async function keepScreenOn() {
+    if (wakeLock || !('wakeLock' in navigator)) return;
+    try {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+    } catch (e) { /* not allowed right now */ }
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') keepScreenOn();
+  });
+
+  // Any tap: go full screen, lock landscape, keep the screen awake.
+  document.addEventListener('pointerup', async () => {
+    if (keyForm.style.display === 'flex') return;   // typing the key, not watching yet
+    try { if (!document.fullscreenElement) await document.documentElement.requestFullscreen({ navigationUI: 'hide' }); } catch (e) {}
+    try { await screen.orientation.lock('landscape'); } catch (e) {}
+    keepScreenOn();
+  });
+  document.addEventListener('fullscreenchange', () => {
+    badge.style.opacity = document.fullscreenElement ? '0' : '1';
+  });
+
+  function askForKeyFrame() {
+    waitingForKey = true;
+    if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'key' }));
+  }
+
+  function setUpDecoder() {
+    if (decoder && decoder.state !== 'closed') { try { decoder.close(); } catch (e) {} }
+    ready = false;
+    if (!streamConfig) return;
+    decoder = new VideoDecoder({
+      output: (frame) => {
+        if (surfaceWidth !== frame.displayWidth || surfaceHeight !== frame.displayHeight) {
+          surfaceWidth = frame.displayWidth;
+          surfaceHeight = frame.displayHeight;
+          if (!frameWriter) { canvas.width = surfaceWidth; canvas.height = surfaceHeight; }
+          layout();
+        }
+        if (frameWriter) {
+          if (frameWriter.desiredSize !== null && frameWriter.desiredSize <= 0) { frame.close(); }   // never build up a backlog
+          else { frameWriter.write(frame).catch(() => {}); }   // the video element closes the frame itself
+        } else {
+          ctx.drawImage(frame, 0, 0);
+          frame.close();
+        }
+        if (hint.style.display !== 'none') setHint('');
+      },
+      error: (e) => {
+        console.warn('Decoder error', e);
+        ready = false;
+        askForKeyFrame();
+      },
+    });
+    try {
+      const description = Uint8Array.from(atob(streamConfig.description), (c) => c.charCodeAt(0));
+      decoder.configure({
+        codec: streamConfig.codec,
+        codedWidth: streamConfig.width,
+        codedHeight: streamConfig.height,
+        description,
+        optimizeForLatency: true,
+      });
+      ready = true;
+      waitingForKey = true;
+    } catch (e) {
+      setHint('Couldn’t start the video decoder: ' + e.message);
+    }
+  }
+
+  // Picture mode: show the newest JPEG, skipping any that arrive while one is still being decoded.
+  let pictureBusy = false;
+  let nextPicture = null;
+  function showPicture(buffer) {
+    if (pictureBusy) { nextPicture = buffer; return; }
+    pictureBusy = true;
+    const fullSize = new Uint8Array(buffer, 0, 1)[0] === 0x10;   // otherwise a half-size picture sent while moving
+    createImageBitmap(new Blob([new Uint8Array(buffer, 1)], { type: 'image/jpeg' }))
+      .then((bitmap) => {
+        const width = fullSize ? bitmap.width : bitmap.width * 2;
+        const height = fullSize ? bitmap.height : bitmap.height * 2;
+        if (canvas.width !== width || canvas.height !== height) {
+          canvas.width = width;
+          canvas.height = height;
+          surfaceWidth = width;
+          surfaceHeight = height;
+          layout();
+        }
+        ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+        bitmap.close();
+        if (hint.style.display !== 'none') setHint('');
+      })
+      .catch((e) => console.warn('Picture decode failed', e))
+      .finally(() => {
+        pictureBusy = false;
+        if (nextPicture) { const next = nextPicture; nextPicture = null; showPicture(next); }
+      });
+  }
+
+  // Over USB the page is "localhost" and needs no key. Over Wi-Fi it checks the key first, and asks for it if needed.
+  const keyForm = document.getElementById('keyform');
+  const keyInput = document.getElementById('keyinput');
+  const keyMessage = document.getElementById('keymsg');
+  const overUSB = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+
+  function askForKey(problem) {
+    setHint('');
+    keyMessage.innerHTML = (problem ? problem + '<br>' : '') + 'Type the access key shown in the TabScreen menu on your Mac.';
+    keyForm.style.display = 'flex';
+    keyInput.value = '';
+    keyInput.focus();
+  }
+  keyForm.addEventListener('submit', (event) => {
+    event.preventDefault();
+    accessKey = keyInput.value.trim().toLowerCase();
+    try { localStorage.setItem('tabscreenKey', accessKey); } catch (e) {}
+    keyForm.style.display = 'none';
+    setHint('Connecting to your Mac…');
+    start();
+  });
+
+  async function start() {
+    if (!overUSB) {
+      if (!accessKey) { askForKey(''); return; }
+      let status = 0;
+      try {
+        status = (await fetch('/auth?k=' + encodeURIComponent(accessKey), { cache: 'no-store' })).status;
+      } catch (e) { status = 0; }
+      if (status === 403) { askForKey('That key didn’t work.'); return; }
+      if (status === 429) { setHint('Too many wrong keys. Wait 10 minutes, then reload this page.'); return; }
+      if (status !== 200) {
+        setHint('Waiting for your Mac… (is TabScreen running with Wi-Fi allowed?)');
+        setTimeout(start, 2000);
+        return;
+      }
+    }
+    connect();
+  }
+
+  function connect() {
+    const url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws' +
+      (accessKey ? '?k=' + encodeURIComponent(accessKey) : '');
+    const ws = new WebSocket(url);
+    socket = ws;
+    ws.binaryType = 'arraybuffer';
+
+    ws.onopen = () => {
+      ws.send(JSON.stringify({
+        type: 'hello',
+        mode: videoMode ? 'h264' : 'jpeg',
+        ua: navigator.userAgent,
+        secure: window.isSecureContext,
+        w: Math.round(screen.width * devicePixelRatio),
+        h: Math.round(screen.height * devicePixelRatio),
+      }));
+      keepScreenOn();
+    };
+
+    ws.onmessage = (event) => {
+      if (typeof event.data === 'string') {
+        let message;
+        try { message = JSON.parse(event.data); } catch (e) { return; }
+        if (message.type === 'replaced') {
+          replaced = true;
+          setHint('TabScreen is showing in another tab.<br>Reload this page to show it here instead.');
+          return;
+        }
+        if (message.type === 'cursor') {
+          pointerAt = message;
+          placePointer();
+          return;
+        }
+        if (message.type === 'cursorImage') {
+          pointerLook = { url: 'data:image/png;base64,' + message.png, hx: message.hx, hy: message.hy, w: message.w, h: message.h };
+          pointer.style.backgroundImage = 'url("' + pointerLook.url + '")';
+          placePointer();
+          return;
+        }
+        if (message.type === 'config') {
+          streamConfig = message;
+          setUpDecoder();
+        }
+        return;
+      }
+      if (!videoMode) { showPicture(event.data); return; }
+      if (!ready) {
+        if (!streamConfig) return;
+        setUpDecoder();
+        if (!ready) return;
+      }
+      const view = new DataView(event.data);
+      const isKey = (view.getUint8(0) & 1) === 1;
+      if (!isKey) {
+        if (waitingForKey) return;
+        if (decoder.decodeQueueSize > 10) { askForKeyFrame(); return; }  // falling behind: jump ahead
+      }
+      waitingForKey = false;
+      decoder.decode(new EncodedVideoChunk({
+        type: isKey ? 'key' : 'delta',
+        timestamp: view.getFloat64(1),
+        data: new Uint8Array(event.data, 9),
+      }));
+    };
+
+    ws.onclose = () => {
+      if (socket !== ws || replaced) return;
+      ready = false;
+      setHint('Waiting for your Mac… (is TabScreen running?)');
+      setTimeout(start, 1000);
+    };
+    ws.onerror = () => { try { ws.close(); } catch (e) {} };
+  }
+
+  start();
+})();
+</script>
+</body>
+</html>
