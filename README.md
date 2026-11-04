@@ -13,6 +13,7 @@ The Android device shows it full screen in the TabScreen app, over a USB cable (
   and every frame shown at the next screen refresh. The mouse pointer is drawn on the device, so it moves instantly.
 - **Plug and play over USB.** Plug the device in and TabScreen installs and opens the app by itself.
 - **Wi-Fi too**, protected by an access key.
+- **Touch control**: tap, drag, right-click and scroll on the device's screen, or use a pen like the S Pen.
 - **Works with most Android devices**: any tablet or phone with Android 8 or newer.
 
 ## What you need
@@ -70,6 +71,19 @@ The extra display takes the shape of whichever device connects, and your choices
 For the smoothest picture, set the device to its highest refresh rate (Samsung: Settings → Display →
 Motion smoothness → Adaptive).
 
+## Touch
+Choose **Touch control** from TabScreen's menu, and allow TabScreen when macOS asks (System Settings →
+Privacy & Security → Accessibility: macOS only lets an app click for you with this permission). Then, in the app on
+the device:
+- **Tap** to click, **double-tap** to double-click.
+- **Touch and drag** to drag: select text, move windows.
+- **Touch and hold**, or **tap with two fingers**, to right-click.
+- **Drag with two fingers** to scroll.
+- **A pen** (like the S Pen) moves the pointer while it hovers and clicks where it touches; its side button
+  right-clicks.
+
+Touch works in the TabScreen app, not in the browser viewer.
+
 ## Build it yourself
 You need Apple's command line developer tools (run `xcode-select --install` in Terminal if you don't have them).
 1. Download this repository (green **Code** button → **Download ZIP**) and unzip it, or clone it.
@@ -92,15 +106,17 @@ The first build makes a signing certificate that stays on your Mac, so the permi
 ## Security
 - In USB mode TabScreen only listens on 127.0.0.1, so nothing on your network can connect.
 - Wi-Fi mode needs the access key; 5 wrong keys block that address for 10 minutes.
-- Only the extra display is sent, never your other screens, and nobody can control the Mac through TabScreen.
-- While the cable is plugged in, other apps on the Android device could also reach TabScreen through adb's tunnel.
-  Only plug in devices you trust.
+- Only the extra display is sent, never your other screens.
+- Touch control is off until you turn it on. Then the TabScreen app can click, drag and scroll on the extra display
+  (it can't type). It only works with the access key, so other apps on the device can't do it.
+- While the cable is plugged in, other apps on the Android device could also reach TabScreen through adb's tunnel
+  and see the extra display. Only plug in devices you trust.
 - Download TabScreen only from this repository's [Releases page](https://github.com/raresmun/TabScreen/releases).
 
 ## Limitations
 - It relies on a private macOS API, so a macOS update could break it.
 - One extra display at a time.
-- No touch input yet: the device is a screen; use the Mac's mouse and keyboard.
+- Touch works like a mouse: no pinch to zoom, and no typing from the device; use the Mac's keyboard.
 
 ## If something doesn't work
 Choose **Show Log File** from TabScreen's menu. The log, `TabScreen.log`, is in `~/Library/Logs/TabScreen`, or next to
