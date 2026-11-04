@@ -17,16 +17,20 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.provider.Settings;
 import android.text.InputType;
 import android.util.DisplayMetrics;
 import android.util.TypedValue;
 import android.view.Display;
 import android.view.Gravity;
+import android.view.HapticFeedbackConstants;
+import android.view.MotionEvent;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.View;
+import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
@@ -49,7 +53,7 @@ import java.util.regex.Pattern;
  */
 public final class MainActivity extends Activity implements SurfaceHolder.Callback {
     private static final String PREFS = "tabscreen";
-    private static final String VERSION = "1.1";
+    private static final String VERSION = "1.2";
     private static final Pattern KEY = Pattern.compile("[a-z0-9]{4,32}");
     private static final Pattern HOST = Pattern.compile("[A-Za-z0-9.-]{1,253}");
 
@@ -78,6 +82,11 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
     private int videoWidth = 2304;
     private int videoHeight = 1440;
     private final Rect videoRect = new Rect();
+
+    // Touches on the picture become clicks, drags and scrolling on the Mac once it allows them.
+    private TouchGestures gestures;
+    private String touchState = "";   // from the Mac: "on", "off", "permission", "nokey"; "" until it says
+    private long lastTouchHint;
 
     // The pointer is drawn here, on top of the video, so it moves without waiting for new pictures.
     private boolean pointerVisible;
@@ -186,6 +195,8 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
         if (oldClient != null) oldClient.stop();   // closes the connection; its thread ends by itself
         if (oldDecoder != null) oldDecoder.release();
         showingVideo = false;
+        touchState = "";   // the next connection says again
+        gestures.reset();
         pointerView.setVisibility(View.INVISIBLE);
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     }
@@ -310,6 +321,16 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
                     pointerWidth = width > 0 ? width : 17;
                     pointerHeight = height > 0 ? height : 25;
                     placePointer();
+                }
+            });
+        }
+
+        @Override
+        public void onInputState(final String state) {
+            onUi(new Runnable() {
+                @Override
+                public void run() {
+                    touchState = state;
                 }
             });
         }
@@ -512,10 +533,49 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
                 }
             }
         });
-        root.setOnClickListener(new View.OnClickListener() {
+        gestures = new TouchGestures(new TouchGestures.Host() {
             @Override
-            public void onClick(View view) {
-                hideSystemBars();
+            public boolean touchEnabled() {
+                return showingVideo && client != null && "on".equals(touchState);
+            }
+
+            @Override
+            public void touchedWhileOff() {
+                showTouchHint();
+            }
+
+            @Override
+            public void send(String json) {
+                StreamClient current = client;
+                if (current != null) current.sendInput(json);
+            }
+
+            @Override
+            public void later(Runnable action, long delayMillis) {
+                ui.postDelayed(action, delayMillis);
+            }
+
+            @Override
+            public void cancel(Runnable action) {
+                ui.removeCallbacks(action);
+            }
+
+            @Override
+            public void tick() {
+                root.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+            }
+        }, ViewConfiguration.get(this).getScaledTouchSlop(), ViewConfiguration.getLongPressTimeout());
+        root.setOnTouchListener(new View.OnTouchListener() {
+            @Override
+            public boolean onTouch(View view, MotionEvent event) {
+                if (event.getActionMasked() == MotionEvent.ACTION_UP) hideSystemBars();   // if an edge swipe showed them
+                return gestures.onTouch(event);
+            }
+        });
+        root.setOnHoverListener(new View.OnHoverListener() {
+            @Override
+            public boolean onHover(View view, MotionEvent event) {
+                return gestures.onHover(event);
             }
         });
         setContentView(root);
@@ -537,6 +597,7 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
         int left = (width - w) / 2;
         int top = (height - h) / 2;
         videoRect.set(left, top, left + w, top + h);
+        gestures.setVideoArea(left, top, w, h);
         FrameLayout.LayoutParams place = (FrameLayout.LayoutParams) videoView.getLayoutParams();
         if (place.width != w || place.height != h) {
             place.width = w;
@@ -632,10 +693,32 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
     }
 
     private void showBadge(String text) {
+        showBadge(text, 1800);
+    }
+
+    private void showBadge(String text, long showMillis) {
         badge.setText(text);
         badge.animate().cancel();
         badge.setAlpha(1f);
-        badge.animate().alpha(0f).setStartDelay(1800).setDuration(500).start();
+        badge.animate().alpha(0f).setStartDelay(showMillis).setDuration(500).start();
+    }
+
+    /** Says why touching the picture does nothing, at most every few seconds. */
+    private void showTouchHint() {
+        long now = SystemClock.uptimeMillis();
+        if (now - lastTouchHint < 5000) return;
+        lastTouchHint = now;
+        String hint;
+        if ("off".equals(touchState)) {
+            hint = "To use touch, turn on Touch control in TabScreen’s menu on your Mac";
+        } else if ("permission".equals(touchState)) {
+            hint = "To use touch, allow TabScreen under Accessibility on your Mac";
+        } else if ("nokey".equals(touchState)) {
+            hint = "To use touch, unplug the cable and plug it in again";
+        } else {
+            hint = "Touch needs the newest TabScreen on your Mac";
+        }
+        showBadge(hint, 3500);
     }
 
     // MARK: - Wi-Fi settings

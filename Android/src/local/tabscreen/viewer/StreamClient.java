@@ -15,6 +15,9 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.URLEncoder;
 import java.nio.charset.Charset;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 
 /**
  * Finds the Mac and keeps the picture coming. It tries the USB cable first (adb makes TabScreen on the Mac reachable
@@ -46,6 +49,12 @@ final class StreamClient implements Runnable {
 
         /** The pointer's look; sizes and hot spot in Mac points. */
         void onCursorImage(Bitmap image, float hotX, float hotY, float width, float height);
+
+        /**
+         * Whether touches control the Mac: "on"; "off" (Touch control is off in TabScreen's menu); "permission"
+         * (macOS hasn't allowed it under Accessibility yet); "nokey" (this connection didn't bring the access key).
+         */
+        void onInputState(String state);
     }
 
     private static final String TAG = "TabScreen";
@@ -72,6 +81,8 @@ final class StreamClient implements Runnable {
     private long lastKeyFrameRequest;
     private boolean replaced;
     private Thread thread;
+    // Touches go out from here: Android doesn't allow network use on the UI thread, where they come in.
+    private final ExecutorService sender = Executors.newSingleThreadExecutor();
 
     StreamClient(Listener listener, VideoDecoder decoder, String wifiHost, String wifiKey, String userAgent,
                  JSONObject screen) {
@@ -96,6 +107,27 @@ final class StreamClient implements Runnable {
         WebSocket current = socket;
         if (current != null) current.close();
         if (thread != null) thread.interrupt();
+        sender.shutdownNow();
+    }
+
+    /** Sends a touch (a mouse action, see {@link TouchGestures}) to the Mac. Called on the UI thread. */
+    void sendInput(final String json) {
+        final WebSocket current = socket;
+        if (current == null) return;
+        try {
+            sender.execute(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        current.sendText(json);
+                    } catch (IOException ignored) {
+                        // the connection is going away; the network thread notices
+                    }
+                }
+            });
+        } catch (RejectedExecutionException ignored) {
+            // stopped
+        }
     }
 
     /** Writes a line into TabScreen.log on the Mac (handy for finding out how things run on the tablet). */
@@ -118,7 +150,9 @@ final class StreamClient implements Runnable {
         boolean wifiUsable = wifiHost != null && wifiKey != null;
         int misses = 0;
         while (running) {
-            int result = session("127.0.0.1", null, true);
+            // The key goes over USB too: the Mac only takes touches from a viewer that knows it, so other apps on this
+            // tablet can't use the cable's tunnel to click on the Mac.
+            int result = session("127.0.0.1", wifiKey, true);
             if (result == UNAVAILABLE && running && wifiUsable) {
                 result = session(wifiHost, wifiKey, false);
                 if (result == WRONG_KEY || result == BLOCKED) {
@@ -254,6 +288,8 @@ final class StreamClient implements Runnable {
             }
         } else if ("replaced".equals(type)) {
             replaced = true;   // another TabScreen window on this tablet took over; the Mac closes this connection
+        } else if ("input".equals(type)) {
+            listener.onInputState(message.optString("touch", ""));
         }
     }
 
