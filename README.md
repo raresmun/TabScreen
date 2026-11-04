@@ -16,17 +16,29 @@ The Android device shows it full screen in the TabScreen app, over a USB cable (
 - **Works with most Android devices**: any tablet or phone with Android 8 or newer.
 
 ## What you need
-- A Mac with Apple silicon, macOS 13 or newer, and Apple's command line developer tools
-  (run `xcode-select --install` in Terminal if you don't have them).
+- A Mac with Apple silicon and macOS 13 or newer.
 - An Android tablet or phone with Android 8 or newer. For USB, a cable that carries data.
 
-## Build and start
-1. Download this repository (green **Code** button → **Download ZIP**) and unzip it, or clone it.
-2. Double-click **Build and Run.command**. A tablet icon appears in the menu bar: that's TabScreen.
-3. When macOS asks, allow Screen Recording for TabScreen (System Settings → Privacy & Security →
-   Screen & System Audio Recording), then choose **Restart TabScreen** from the menu bar icon.
+## Install on the Mac
+1. Download **[TabScreen.dmg](https://github.com/raresmun/TabScreen/releases/latest/download/TabScreen.dmg)**,
+   open it and drag TabScreen into Applications.
+2. Open TabScreen. The first time, macOS stops it because it isn't notarized by Apple (that needs a paid Apple
+   developer membership). Click **Done**, then go to System Settings → Privacy & Security, scroll down, click
+   **Open Anyway** next to TabScreen and confirm with your password or Touch ID.
+3. A tablet icon appears in the menu bar: that's TabScreen. When macOS asks, allow Screen Recording for TabScreen
+   (System Settings → Privacy & Security → Screen & System Audio Recording), then choose **Restart TabScreen**
+   from the menu bar icon.
 
-The first build makes a signing certificate that stays on your Mac, so the permission survives later rebuilds.
+To start TabScreen with your Mac, choose **Open at Login** from its menu.
+
+## Install on the Android device
+Over USB there's nothing to install by hand: TabScreen puts its app on the device the first time you plug it in
+(see below). For Wi-Fi only, open
+**[TabScreen.apk](https://github.com/raresmun/TabScreen/releases/latest/download/TabScreen.apk)** on the device,
+or scan this code with its camera, and allow your browser to install apps when it asks.
+Samsung: turn off **Auto Blocker** first (Settings → Security and privacy); it blocks apps from outside the stores.
+
+<img src="docs/tablet-app-qr.png" width="160" alt="QR code that downloads TabScreen.apk">
 
 ## Connect over USB (recommended)
 On the Android device, once:
@@ -58,6 +70,14 @@ The extra display takes the shape of whichever device connects, and your choices
 For the smoothest picture, set the device to its highest refresh rate (Samsung: Settings → Display →
 Motion smoothness → Adaptive).
 
+## Build it yourself
+You need Apple's command line developer tools (run `xcode-select --install` in Terminal if you don't have them).
+1. Download this repository (green **Code** button → **Download ZIP**) and unzip it, or clone it.
+2. Double-click **Build and Run.command**. TabScreen builds and starts; allow Screen Recording as above.
+
+The first build makes a signing certificate that stays on your Mac, so the permission survives later rebuilds.
+**Make DMG.command** makes the disk image for a release, `dist/TabScreen.dmg`, and puts the tablet app next to it.
+
 ## How it works
 - `Sources/` is the Mac app, in Swift. It makes the extra display with macOS's private `CGVirtualDisplay` API
   (the one DeskPad and BetterDisplay use), captures it with ScreenCaptureKit, encodes it with VideoToolbox in
@@ -75,6 +95,7 @@ Motion smoothness → Adaptive).
 - Only the extra display is sent, never your other screens, and nobody can control the Mac through TabScreen.
 - While the cable is plugged in, other apps on the Android device could also reach TabScreen through adb's tunnel.
   Only plug in devices you trust.
+- Download TabScreen only from this repository's [Releases page](https://github.com/raresmun/TabScreen/releases).
 
 ## Limitations
 - It relies on a private macOS API, so a macOS update could break it.
@@ -82,8 +103,8 @@ Motion smoothness → Adaptive).
 - No touch input yet: the device is a screen; use the Mac's mouse and keyboard.
 
 ## If something doesn't work
-TabScreen writes `TabScreen.log` next to the app (the Android app adds notes about its decoder and timing), and the
-build writes `build.log`.
+Choose **Show Log File** from TabScreen's menu. The log, `TabScreen.log`, is in `~/Library/Logs/TabScreen`, or next to
+the app when you build it yourself; the Android app adds notes about its decoder and timing. Builds write `build.log`.
 
 ## License
 MIT. See [LICENSE](LICENSE).
