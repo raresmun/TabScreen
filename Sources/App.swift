@@ -1,8 +1,5 @@
 import AppKit
 
-/// Galaxy Tab S10 FE screen size in pixels (landscape). The video is sent at this size.
-let tabletPixelWidth = 2304
-let tabletPixelHeight = 1440
 /// Port used for the viewer page and the video stream.
 let serverPort: UInt16 = 7171
 
@@ -22,10 +19,16 @@ struct TabScreenApp {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// How much data the video may use, relative to "Balanced".
+    private static let qualities: [(title: String, factor: Double)] = [
+        ("Lighter – for slow Wi-Fi", 0.5),
+        ("Balanced", 1.0),
+        ("Sharper – uses more data", 1.6),
+    ]
+
     private var statusItem: NSStatusItem?
     private let virtualScreen = VirtualScreen()
     private var server: StreamServer?
-    private var encoder: H264Encoder?
     private var capturer: ScreenCapturer?
     private var usb: USBHelper?
     private var cursor: CursorTracker?
@@ -36,12 +39,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var installingUSBHelper = false
     private var problem: String?
     private var wifiEnabled = false   // switched on by hand each time, so Wi-Fi access is never left open by accident
-    private var presetIndex = UserDefaults.standard.integer(forKey: "presetIndex")
+    private var device = AppDelegate.loadDevice()   // the screen the extra display is shaped for
+    private var quality = UserDefaults.standard.object(forKey: "quality") as? Int ?? 1
+    private var displayGeneration = 0
     private let accessKey = AppDelegate.loadAccessKey()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Log.reset()
         UserDefaults.standard.removeObject(forKey: "wifiEnabled")   // from an older version
+        UserDefaults.standard.removeObject(forKey: "presetIndex")   // from an older version
         Log.write("TabScreen starting")
 
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -59,17 +65,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             problem = "Allow Screen Recording for TabScreen, then restart it"
         }
 
-        guard virtualScreen.create() else {
-            problem = "Couldn't create the extra display"
-            rebuildMenu()
-            return
-        }
-        applyPreset(attempt: 0)
-
         let page = Bundle.main.url(forResource: "viewer", withExtension: "html").flatMap { try? Data(contentsOf: $0) }
             ?? Data("<h1>viewer.html is missing – rebuild TabScreen</h1>".utf8)
         let server = StreamServer(port: serverPort, html: page, accessKey: accessKey, allowNetwork: wifiEnabled)
-        let encoder = H264Encoder(width: tabletPixelWidth, height: tabletPixelHeight)
+        let encoder = H264Encoder()
         let jpegEncoder = JPEGEncoder()
         let capturer = ScreenCapturer(encoder: encoder, jpegEncoder: jpegEncoder)
         encoder.sink = server
@@ -83,23 +82,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             capturer?.setVideoWanted(count > 0)
             Task { @MainActor in self.viewerCountChanged(count) }
         }
+        server.onDeviceScreen = { screen in
+            Task { @MainActor in self.deviceConnected(screen) }
+        }
         capturer.onError = { message in
             Task { @MainActor in self.showProblem(message) }
         }
         self.server = server
-        self.encoder = encoder
         self.capturer = capturer
-
         server.start()
-        if encoder.start() {
-            capturer.start(displayID: virtualScreen.displayID, width: tabletPixelWidth, height: tabletPixelHeight)
-        } else {
-            problem = "The video encoder failed to start"
-        }
 
-        let cursor = CursorTracker(displayID: virtualScreen.displayID, server: server)
+        let cursor = CursorTracker(server: server)
         cursor.start()
         self.cursor = cursor
+
+        showExtraDisplay()
         if let ip = lanIPv4() { Log.write("Mac address for the tablet: http://\(ip):\(serverPort)") }
 
         let usb = USBHelper(port: Int(serverPort), accessKey: accessKey)
@@ -116,6 +113,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         capturer?.stop()
         virtualScreen.destroy()
         Log.write("TabScreen quit")
+    }
+
+    // MARK: - The extra display
+
+    /// Creates the extra display, shaped for the current device, and starts sending it.
+    private func showExtraDisplay() {
+        guard virtualScreen.create(for: device) else {
+            showProblem("Couldn't create the extra display")
+            return
+        }
+        cursor?.displayID = virtualScreen.displayID
+        applySize(attempt: 0)
+        let video = device.video
+        capturer?.start(displayID: virtualScreen.displayID, width: video.width, height: video.height,
+                        fps: video.fps, bitrate: bitrate(for: video))
+    }
+
+    /// A tablet or phone connected and described its screen. If it's a different screen, the extra display is
+    /// rebuilt in its shape (macOS moves the windows on it to the main screen while that happens).
+    private func deviceConnected(_ screen: DeviceScreen) {
+        guard screen != device else { return }
+        Log.write("Shaping the extra display for \(screen.name): \(screen.pixelWidth)x\(screen.pixelHeight) at \(screen.refreshRate) Hz"
+                  + (screen.widthMM > 0 ? ", \(screen.widthMM)x\(screen.heightMM) mm" : ""))
+        device = screen
+        saveDevice()
+        displayGeneration += 1
+        let generation = displayGeneration
+        capturer?.stop()
+        cursor?.displayID = 0
+        virtualScreen.destroy()
+        rebuildMenu()
+        Task { @MainActor in
+            // Give macOS a moment to take the old display away before adding the new one.
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            guard generation == self.displayGeneration else { return }
+            self.showExtraDisplay()
+            self.rebuildMenu()
+        }
+    }
+
+    private func applySize(attempt: Int) {
+        let generation = displayGeneration
+        if !virtualScreen.apply(pointsWide: chosenPointsWide()) && attempt < 10 {
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                guard generation == self.displayGeneration else { return }
+                self.applySize(attempt: attempt + 1)
+            }
+        }
+    }
+
+    /// The "looks like" width picked for this device, or the default (text about as big as on the Mac).
+    private func chosenPointsWide() -> Int {
+        let saved = UserDefaults.standard.integer(forKey: "pointsWide " + device.key)
+        if saved > 0 && device.sizeChoices.contains(where: { $0.pointsWide == saved }) { return saved }
+        return device.defaultPointsWide
+    }
+
+    /// Video data rate: about 20 Mbit/s for 2304 x 1440 at 90 frames a second, scaled by size, frame rate and quality.
+    private func bitrate(for video: (width: Int, height: Int, fps: Int)) -> Int {
+        let factor = AppDelegate.qualities[max(0, min(quality, AppDelegate.qualities.count - 1))].factor
+        let base = 20_000_000.0 * Double(video.width * video.height * video.fps) / Double(2304 * 1440 * 90)
+        return Int(min(max(base * factor, 3_000_000), 60_000_000))
     }
 
     // MARK: - State updates
@@ -135,17 +195,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func showProblem(_ message: String) {
         problem = message
         rebuildMenu()
-    }
-
-    private func applyPreset(attempt: Int) {
-        let index = max(0, min(presetIndex, VirtualScreen.presets.count - 1))
-        let pointsWide = VirtualScreen.presets[index].pointsWide
-        if !virtualScreen.apply(pointsWide: pointsWide) && attempt < 10 {
-            Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 500_000_000)
-                self.applyPreset(attempt: attempt + 1)
-            }
-        }
     }
 
     private func wifiAddress() -> String? {
@@ -169,6 +218,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item.target = self
             menu.addItem(item)
         }
+        func addSubmenu(_ title: String, _ entries: [(title: String, tag: Int, on: Bool)], _ action: Selector) {
+            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            let submenu = NSMenu()
+            submenu.autoenablesItems = false
+            for entry in entries {
+                let entryItem = NSMenuItem(title: entry.title, action: action, keyEquivalent: "")
+                entryItem.target = self
+                entryItem.tag = entry.tag
+                entryItem.state = entry.on ? .on : .off
+                submenu.addItem(entryItem)
+            }
+            item.submenu = submenu
+            menu.addItem(item)
+        }
 
         if let problem = problem {
             addAction("⚠️ " + problem, #selector(openScreenRecordingSettings))
@@ -176,7 +239,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(NSMenuItem.separator())
         }
 
-        addInfo(viewerCount > 0 ? "● Tablet is showing the display" : "○ Waiting for the tablet…")
+        addInfo(viewerCount > 0 ? "● \(device.name) is showing the display" : "○ Waiting for a tablet or phone…")
         addInfo(usbStatus)
         if !usbHelperInstalled {
             if installingUSBHelper {
@@ -202,18 +265,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         menu.addItem(NSMenuItem.separator())
-        let sizeItem = NSMenuItem(title: "Screen size", action: nil, keyEquivalent: "")
-        let sizeMenu = NSMenu()
-        sizeMenu.autoenablesItems = false
-        for (index, preset) in VirtualScreen.presets.enumerated() {
-            let item = NSMenuItem(title: preset.title, action: #selector(choosePreset(_:)), keyEquivalent: "")
-            item.target = self
-            item.tag = index
-            item.state = index == presetIndex ? .on : .off
-            sizeMenu.addItem(item)
-        }
-        sizeItem.submenu = sizeMenu
-        menu.addItem(sizeItem)
+        let video = device.video
+        let shapedFor = device == DeviceScreen.standard ? "" : " – \(device.name)"
+        addInfo("Extra display: \(video.width) × \(video.height) at \(video.fps) Hz\(shapedFor)")
+        let chosen = chosenPointsWide()
+        addSubmenu("Screen size", device.sizeChoices.map { (title: $0.title, tag: $0.pointsWide, on: $0.pointsWide == chosen) },
+                   #selector(chooseSize(_:)))
+        addSubmenu("Picture quality", AppDelegate.qualities.enumerated().map { (title: $0.element.title, tag: $0.offset, on: $0.offset == quality) },
+                   #selector(chooseQuality(_:)))
         addAction("Arrange displays…", #selector(openDisplaySettings))
 
         menu.addItem(NSMenuItem.separator())
@@ -255,10 +314,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSPasteboard.general.setString(address, forType: .string)
     }
 
-    @objc private func choosePreset(_ sender: NSMenuItem) {
-        presetIndex = sender.tag
-        UserDefaults.standard.set(presetIndex, forKey: "presetIndex")
-        applyPreset(attempt: 0)
+    @objc private func chooseSize(_ sender: NSMenuItem) {
+        UserDefaults.standard.set(sender.tag, forKey: "pointsWide " + device.key)
+        applySize(attempt: 0)
+        rebuildMenu()
+    }
+
+    @objc private func chooseQuality(_ sender: NSMenuItem) {
+        quality = sender.tag
+        UserDefaults.standard.set(quality, forKey: "quality")
+        capturer?.setBitrate(bitrate(for: device.video))
         rebuildMenu()
     }
 
@@ -277,6 +342,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func quit() {
         NSApp.terminate(nil)
+    }
+
+    // MARK: - Saved settings
+
+    private func saveDevice() {
+        if let data = try? JSONEncoder().encode(device) {
+            UserDefaults.standard.set(data, forKey: "device")
+        }
+    }
+
+    nonisolated private static func loadDevice() -> DeviceScreen {
+        if let data = UserDefaults.standard.data(forKey: "device"),
+           let saved = try? JSONDecoder().decode(DeviceScreen.self, from: data) {
+            return saved
+        }
+        return .standard
     }
 
     nonisolated private static func loadAccessKey() -> String {
