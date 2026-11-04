@@ -10,7 +10,7 @@ struct StreamConfig: Equatable {
     let codec: String
     let width: Int
     let height: Int
-    let description: Data   // avcC record the browser's decoder needs
+    let description: Data   // avcC record the viewer's decoder needs
 }
 
 protocol EncodedFrameSink: AnyObject {
@@ -18,23 +18,23 @@ protocol EncodedFrameSink: AnyObject {
     func encoderProduced(frame: Data, isKeyFrame: Bool, timestampMicros: Double)
 }
 
-/// Hardware H.264 encoder tuned for low latency.
+/// Hardware H.264 encoder tuned for low latency. The capturer sets it up for each video size (on its queue).
 final class H264Encoder: @unchecked Sendable {
-    let width: Int
-    let height: Int
     weak var sink: EncodedFrameSink?
 
     private var session: VTCompressionSession?
+    private var width = 0
+    private var height = 0
     private var lastConfig: StreamConfig?
     private let lock = NSLock()
     private var forceKeyFrame = true
 
-    init(width: Int, height: Int) {
-        self.width = width
-        self.height = height
-    }
-
-    func start() -> Bool {
+    /// Starts a fresh compression session for this size, frame rate and data rate. Returns false if it couldn't.
+    func configure(width: Int, height: Int, fps: Int, bitrate: Int) -> Bool {
+        if let old = session {
+            VTCompressionSessionInvalidate(old)
+            session = nil
+        }
         var created: VTCompressionSession?
         let lowLatencySpec = [kVTVideoEncoderSpecification_EnableLowLatencyRateControl as String: true] as CFDictionary
         var status = VTCompressionSessionCreate(allocator: nil, width: Int32(width), height: Int32(height),
@@ -50,30 +50,41 @@ final class H264Encoder: @unchecked Sendable {
                                                 imageBufferAttributes: nil, compressedDataAllocator: nil,
                                                 outputCallback: nil, refcon: nil, compressionSessionOut: &created)
         }
-        guard status == noErr, let session = created else {
+        guard status == noErr, let newSession = created else {
             Log.write("Could not create the video encoder (\(status))")
             return false
         }
         func set(_ key: CFString, _ value: CFTypeRef) {
-            let result = VTSessionSetProperty(session, key: key, value: value)
+            let result = VTSessionSetProperty(newSession, key: key, value: value)
             if result != noErr { Log.write("Encoder setting \(key) not applied (\(result))") }
         }
         set(kVTCompressionPropertyKey_RealTime, kCFBooleanTrue)
         set(kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse)
-        // Baseline-type H.264 never reorders frames, so the tablet's hardware decoder can show every frame
+        // Baseline-type H.264 never reorders frames, so the viewer's hardware decoder can show every frame
         // the moment it arrives instead of holding a few back.
-        if VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel,
+        if VTSessionSetProperty(newSession, key: kVTCompressionPropertyKey_ProfileLevel,
                                 value: "H264_ConstrainedBaseline_AutoLevel" as CFString) != noErr {
             set(kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_Baseline_AutoLevel)
         }
-        set(kVTCompressionPropertyKey_MaxFrameDelayCount, NSNumber(value: 0))
-        set(kVTCompressionPropertyKey_AverageBitRate, NSNumber(value: 20_000_000))
-        set(kVTCompressionPropertyKey_ExpectedFrameRate, NSNumber(value: 90))
-        set(kVTCompressionPropertyKey_MaxKeyFrameInterval, NSNumber(value: 3600))
-        VTCompressionSessionPrepareToEncodeFrames(session)
-        self.session = session
-        Log.write("Encoder ready: \(width)x\(height), low latency: \(lowLatency)")
+        set(kVTCompressionPropertyKey_AverageBitRate, NSNumber(value: bitrate))
+        set(kVTCompressionPropertyKey_ExpectedFrameRate, NSNumber(value: fps))
+        set(kVTCompressionPropertyKey_MaxKeyFrameInterval, NSNumber(value: fps * 40))
+        VTCompressionSessionPrepareToEncodeFrames(newSession)
+        session = newSession
+        self.width = width
+        self.height = height
+        lock.lock()
+        forceKeyFrame = true
+        lock.unlock()
+        Log.write("Encoder ready: \(width)x\(height) at up to \(fps) fps, \(bitrate / 1_000_000) Mbit/s, low latency: \(lowLatency)")
         return true
+    }
+
+    /// Changes how much data the video may use, without restarting.
+    func setBitrate(_ bitrate: Int) {
+        guard let session = session else { return }
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: NSNumber(value: bitrate))
+        Log.write("Video data rate set to \(bitrate / 1_000_000) Mbit/s")
     }
 
     func requestKeyFrame() {
@@ -83,7 +94,9 @@ final class H264Encoder: @unchecked Sendable {
     }
 
     func encode(_ pixelBuffer: CVPixelBuffer) {
-        guard let session = session else { return }
+        // Pictures left over from before a size change don't fit the session: skip them.
+        guard let session = session,
+              CVPixelBufferGetWidth(pixelBuffer) == width, CVPixelBufferGetHeight(pixelBuffer) == height else { return }
         lock.lock()
         let keyFrame = forceKeyFrame
         forceKeyFrame = false
@@ -180,7 +193,8 @@ final class JPEGEncoder: @unchecked Sendable {
     }
 }
 
-/// Captures the virtual display with ScreenCaptureKit and feeds the frames to the encoders.
+/// Captures the extra display with ScreenCaptureKit and feeds the frames to the encoders.
+/// Everything here runs on its own queue; start() can be called again for a new display or size.
 final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     var onError: (@Sendable (String) -> Void)?
 
@@ -188,6 +202,7 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     private let jpegEncoder: JPEGEncoder
     private let queue = DispatchQueue(label: "tabscreen.capture", qos: .userInteractive)
     private var captureStream: SCStream?
+    private var generation = 0   // counts start/stop calls, so late answers for an older setup are ignored
     private var lastBuffer: CVPixelBuffer?
     private var lastFrameTime = Date.distantPast
     private var sharpenPasses = 0
@@ -203,62 +218,101 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         super.init()
     }
 
-    func start(displayID: CGDirectDisplayID, width: Int, height: Int, attempt: Int = 0) {
-        SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: false) { [weak self] content, error in
-            guard let self = self else { return }
-            if let error = error {
-                Log.write("Screen capture not allowed: \(error.localizedDescription)")
-                self.onError?("Allow Screen Recording for TabScreen, then restart it")
+    /// Captures the display at `width` x `height` (the video size), up to `fps` frames a second.
+    func start(displayID: CGDirectDisplayID, width: Int, height: Int, fps: Int, bitrate: Int) {
+        queue.async {
+            self.generation += 1
+            let generation = self.generation
+            self.stopStream()
+            self.lastBuffer = nil
+            guard self.encoder.configure(width: width, height: height, fps: fps, bitrate: bitrate) else {
+                self.onError?("The video encoder failed to start")
                 return
             }
-            guard let display = content?.displays.first(where: { $0.displayID == displayID }) else {
-                if attempt < 20 {
-                    self.queue.asyncAfter(deadline: .now() + 0.25) {
-                        self.start(displayID: displayID, width: width, height: height, attempt: attempt + 1)
-                    }
-                } else {
-                    Log.write("The virtual display never showed up for capture")
-                    self.onError?("Couldn't capture the extra display")
-                }
-                return
-            }
-            let filter = SCContentFilter(display: display, excludingWindows: [])
-            let configuration = SCStreamConfiguration()
-            configuration.width = width
-            configuration.height = height
-            configuration.minimumFrameInterval = CMTime(value: 1, timescale: 90)
-            configuration.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-            configuration.showsCursor = false   // the tablet draws the pointer itself (see CursorTracker)
-            configuration.queueDepth = 6
-            let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
-            do {
-                try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: self.queue)
-            } catch {
-                Log.write("Could not attach to the capture stream: \(error.localizedDescription)")
-                self.onError?("Capture failed to start")
-                return
-            }
-            self.captureStream = stream
-            stream.startCapture { error in
-                if let error = error {
-                    Log.write("Capture failed to start: \(error.localizedDescription)")
-                    self.onError?("Capture failed: \(error.localizedDescription)")
-                } else {
-                    Log.write("Capturing the extra display at \(width)x\(height)")
-                }
-            }
-            self.startIdleTimer()
+            self.findDisplay(displayID, width: width, height: height, fps: fps, generation: generation, attempt: 0)
         }
     }
 
     func stop() {
-        idleTimer?.cancel()
-        idleTimer = nil
-        captureStream?.stopCapture { _ in }
-        captureStream = nil
+        queue.async {
+            self.generation += 1
+            self.stopStream()
+            self.lastBuffer = nil
+        }
     }
 
-    /// Encodes the latest picture again – used when the tablet connects or asks for a fresh key frame.
+    func setBitrate(_ bitrate: Int) {
+        queue.async { self.encoder.setBitrate(bitrate) }
+    }
+
+    // On queue.
+    private func stopStream() {
+        guard let stream = captureStream else { return }
+        captureStream = nil
+        stream.stopCapture { _ in }
+    }
+
+    // On queue. The display can take a moment to show up after it's created.
+    private func findDisplay(_ displayID: CGDirectDisplayID, width: Int, height: Int, fps: Int, generation: Int, attempt: Int) {
+        SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: false) { [weak self] content, error in
+            guard let self = self else { return }
+            let display = content?.displays.first(where: { $0.displayID == displayID })
+            let failure = error?.localizedDescription
+            self.queue.async {
+                guard generation == self.generation else { return }   // started again or stopped meanwhile
+                if let failure = failure {
+                    Log.write("Screen capture not allowed: \(failure)")
+                    self.onError?("Allow Screen Recording for TabScreen, then restart it")
+                    return
+                }
+                guard let display = display else {
+                    if attempt < 20 {
+                        self.queue.asyncAfter(deadline: .now() + 0.25) {
+                            guard generation == self.generation else { return }
+                            self.findDisplay(displayID, width: width, height: height, fps: fps, generation: generation, attempt: attempt + 1)
+                        }
+                    } else {
+                        Log.write("The extra display never showed up for capture")
+                        self.onError?("Couldn't capture the extra display")
+                    }
+                    return
+                }
+                self.startStream(on: display, width: width, height: height, fps: fps)
+            }
+        }
+    }
+
+    // On queue.
+    private func startStream(on display: SCDisplay, width: Int, height: Int, fps: Int) {
+        let filter = SCContentFilter(display: display, excludingWindows: [])
+        let configuration = SCStreamConfiguration()
+        configuration.width = width
+        configuration.height = height
+        configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
+        configuration.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        configuration.showsCursor = false   // the viewer draws the pointer itself (see CursorTracker)
+        configuration.queueDepth = 6
+        let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
+        do {
+            try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
+        } catch {
+            Log.write("Could not attach to the capture stream: \(error.localizedDescription)")
+            onError?("Capture failed to start")
+            return
+        }
+        captureStream = stream
+        stream.startCapture { error in
+            if let error = error {
+                Log.write("Capture failed to start: \(error.localizedDescription)")
+                self.onError?("Capture failed: \(error.localizedDescription)")
+            } else {
+                Log.write("Capturing the extra display at \(width)x\(height), up to \(fps) fps")
+            }
+        }
+        if idleTimer == nil { startIdleTimer() }
+    }
+
+    /// Encodes the latest picture again – used when a viewer connects or asks for a fresh key frame.
     func resendLastFrame(asKeyFrame: Bool) {
         queue.async {
             guard let buffer = self.lastBuffer else { return }
@@ -267,8 +321,8 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         }
     }
 
-    /// Turns video encoding on or off: no need to encode (and use battery) while no tablet is watching.
-    /// When a tablet connects it asks for a key frame, which encodes the latest picture right away.
+    /// Turns video encoding on or off: no need to encode (and use battery) while no viewer is watching.
+    /// When a viewer connects it asks for a key frame, which encodes the latest picture right away.
     func setVideoWanted(_ wanted: Bool) {
         queue.async { self.videoWanted = wanted }
     }
@@ -278,7 +332,7 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         queue.async { self.jpegWanted = wanted }
     }
 
-    /// Sends the current picture right away (a tablet just connected, or its connection caught up).
+    /// Sends the current picture right away (a viewer just connected, or its connection caught up).
     func sendJPEGNow() {
         queue.async {
             guard self.jpegWanted, let buffer = self.lastBuffer else { return }
@@ -309,8 +363,9 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         idleTimer = timer
     }
 
+    // Runs on queue (it's the sample handler queue).
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .screen, CMSampleBufferIsValid(sampleBuffer),
+        guard stream === captureStream, type == .screen, CMSampleBufferIsValid(sampleBuffer),
               let attachmentsArray = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
               let attachments = attachmentsArray.first,
               let statusValue = attachments[SCStreamFrameInfo.status] as? Int,
@@ -330,7 +385,14 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
-        Log.write("Capture stopped: \(error.localizedDescription)")
-        onError?("Capture stopped: \(error.localizedDescription)")
+        let stoppedStream = ObjectIdentifier(stream)
+        let message = error.localizedDescription
+        queue.async {
+            // Streams stopped on purpose (display changed) don't count.
+            guard let current = self.captureStream, ObjectIdentifier(current) == stoppedStream else { return }
+            self.captureStream = nil
+            Log.write("Capture stopped: \(message)")
+            self.onError?("Capture stopped: \(message)")
+        }
     }
 }
