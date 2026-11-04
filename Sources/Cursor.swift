@@ -1,17 +1,17 @@
 import AppKit
 
-/// Follows the mouse while it is on the extra display and tells the tablet where to draw the pointer.
-/// The tablet draws the pointer itself, so it moves right away instead of waiting for new screen pictures.
+/// Follows the mouse while it is on the extra display and tells the viewer where to draw the pointer.
+/// The viewer draws the pointer itself, so it moves right away instead of waiting for new screen pictures.
 final class CursorTracker: @unchecked Sendable {
-    private let displayID: CGDirectDisplayID
+    /// The extra display to follow; 0 while there is none. Only touched on the main thread.
+    var displayID: CGDirectDisplayID = 0
     private let server: StreamServer
     private var timer: DispatchSourceTimer?
     private var lastPosition: String?
     private var lastImage: Data?
     private var ticks = 0
 
-    init(displayID: CGDirectDisplayID, server: StreamServer) {
-        self.displayID = displayID
+    init(server: StreamServer) {
         self.server = server
     }
 
@@ -25,6 +25,7 @@ final class CursorTracker: @unchecked Sendable {
 
     private func tick() {
         ticks += 1
+        guard displayID != 0 else { return }
         let bounds = CGDisplayBounds(displayID)
         guard bounds.width > 0, bounds.height > 0, let location = CGEvent(source: nil)?.location else { return }
         let x = (location.x - bounds.minX) / bounds.width
