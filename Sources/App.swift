@@ -118,26 +118,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - The extra display
 
     /// Creates the extra display, shaped for the current device, and starts sending it.
-    private func showExtraDisplay() {
+    private func showExtraDisplay(attempt: Int = 0) {
         guard virtualScreen.create(for: device) else {
-            showProblem("Couldn't create the extra display")
+            if attempt < 2 {
+                // macOS may still be taking the previous display away: try again in a moment.
+                let generation = displayGeneration
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                    guard generation == self.displayGeneration else { return }
+                    self.showExtraDisplay(attempt: attempt + 1)
+                }
+            } else {
+                showProblem("Couldn't create the extra display")
+            }
             return
         }
+        if CGPreflightScreenCaptureAccess() { problem = nil }   // earlier capture problems are over
+        saveDevice()   // only shapes that worked are remembered
         cursor?.displayID = virtualScreen.displayID
         applySize(attempt: 0)
+        startCapture()
+        rebuildMenu()
+    }
+
+    private func startCapture() {
         let video = device.video
         capturer?.start(displayID: virtualScreen.displayID, width: video.width, height: video.height,
                         fps: video.fps, bitrate: bitrate(for: video))
     }
 
-    /// A tablet or phone connected and described its screen. If it's a different screen, the extra display is
-    /// rebuilt in its shape (macOS moves the windows on it to the main screen while that happens).
+    /// A tablet or phone connected and described its screen. If its screen has another shape, the extra display is
+    /// rebuilt for it (macOS moves the windows on it to the main screen meanwhile); otherwise only the video changes.
     private func deviceConnected(_ screen: DeviceScreen) {
-        guard screen != device else { return }
+        guard screen != device || virtualScreen.displayID == 0 else { return }
         Log.write("Shaping the extra display for \(screen.name): \(screen.pixelWidth)x\(screen.pixelHeight) at \(screen.refreshRate) Hz"
                   + (screen.widthMM > 0 ? ", \(screen.widthMM)x\(screen.heightMM) mm" : ""))
+        let sameDisplay = virtualScreen.displayID != 0 && screen.name == device.name
+            && screen.displayModes == device.displayModes && screen.physicalSizeMM == device.physicalSizeMM
+            && screen.video.fps == device.video.fps
         device = screen
-        saveDevice()
+        if sameDisplay {
+            saveDevice()
+            startCapture()   // same display; only the video's size or limits changed
+            rebuildMenu()
+            return
+        }
         displayGeneration += 1
         let generation = displayGeneration
         capturer?.stop()
@@ -146,10 +171,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         rebuildMenu()
         Task { @MainActor in
             // Give macOS a moment to take the old display away before adding the new one.
-            try? await Task.sleep(nanoseconds: 600_000_000)
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
             guard generation == self.displayGeneration else { return }
             self.showExtraDisplay()
-            self.rebuildMenu()
         }
     }
 
@@ -354,7 +378,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     nonisolated private static func loadDevice() -> DeviceScreen {
         if let data = UserDefaults.standard.data(forKey: "device"),
-           let saved = try? JSONDecoder().decode(DeviceScreen.self, from: data) {
+           let saved = try? JSONDecoder().decode(DeviceScreen.self, from: data),
+           saved.pixelWidth >= 320, saved.pixelHeight >= 200, saved.pixelWidth <= 8192, saved.pixelHeight <= 8192,
+           saved.refreshRate > 0 {
             return saved
         }
         return .standard

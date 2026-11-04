@@ -302,11 +302,16 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         }
         captureStream = stream
         stream.startCapture { error in
-            if let error = error {
-                Log.write("Capture failed to start: \(error.localizedDescription)")
-                self.onError?("Capture failed: \(error.localizedDescription)")
-            } else {
+            guard let error = error else {
                 Log.write("Capturing the extra display at \(width)x\(height), up to \(fps) fps")
+                return
+            }
+            let message = error.localizedDescription
+            self.queue.async {
+                guard self.captureStream === stream else { return }   // stopped or replaced meanwhile
+                self.captureStream = nil
+                Log.write("Capture failed to start: \(message)")
+                self.onError?("Capture failed: \(message)")
             }
         }
         if idleTimer == nil { startIdleTimer() }
@@ -385,11 +390,10 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
-        let stoppedStream = ObjectIdentifier(stream)
         let message = error.localizedDescription
         queue.async {
             // Streams stopped on purpose (display changed) don't count.
-            guard let current = self.captureStream, ObjectIdentifier(current) == stoppedStream else { return }
+            guard let current = self.captureStream, current === stream else { return }
             self.captureStream = nil
             Log.write("Capture stopped: \(message)")
             self.onError?("Capture stopped: \(message)")

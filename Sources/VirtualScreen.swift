@@ -62,7 +62,11 @@ final class VirtualScreen {
         }
         var configRef: CGDisplayConfigRef?
         guard CGBeginDisplayConfiguration(&configRef) == .success, let config = configRef else { return false }
-        CGConfigureDisplayWithDisplayMode(config, id, mode, nil)
+        guard CGConfigureDisplayWithDisplayMode(config, id, mode, nil) == .success else {
+            _ = CGCancelDisplayConfiguration(config)
+            Log.write("Display mode \(mode.width)x\(mode.height) not accepted yet")
+            return false
+        }
         let result = CGCompleteDisplayConfiguration(config, .permanently)
         Log.write("Display mode set to \(mode.width)x\(mode.height) [pixels \(mode.pixelWidth)x\(mode.pixelHeight)] @ \(Int(mode.refreshRate)) Hz, result \(result.rawValue)")
         return result == .success
