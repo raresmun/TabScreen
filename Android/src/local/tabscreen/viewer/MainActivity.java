@@ -10,7 +10,6 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Path;
-import android.graphics.Point;
 import android.graphics.Rect;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
@@ -18,7 +17,9 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.Settings;
 import android.text.InputType;
+import android.util.DisplayMetrics;
 import android.util.TypedValue;
 import android.view.Display;
 import android.view.Gravity;
@@ -36,6 +37,9 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
+import org.json.JSONException;
+import org.json.JSONObject;
+
 import java.util.Locale;
 import java.util.regex.Pattern;
 
@@ -45,7 +49,7 @@ import java.util.regex.Pattern;
  */
 public final class MainActivity extends Activity implements SurfaceHolder.Callback {
     private static final String PREFS = "tabscreen";
-    private static final String VERSION = "1.0";
+    private static final String VERSION = "1.1";
     private static final Pattern KEY = Pattern.compile("[a-z0-9]{4,32}");
     private static final Pattern HOST = Pattern.compile("[A-Za-z0-9.-]{1,253}");
 
@@ -162,11 +166,8 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
         if (problem == StreamClient.PROBLEM_WRONG_KEY || problem == StreamClient.PROBLEM_BLOCKED) {
             key = null;   // USB only until the key is fixed, so the Mac doesn't count more wrong keys
         }
-        Point size = new Point();
-        getWindowManager().getDefaultDisplay().getRealSize(size);
         decoder = new VideoDecoder(videoView.getHolder().getSurface(), events);
-        client = new StreamClient(events, decoder, host, key, userAgent(),
-                Math.max(size.x, size.y), Math.min(size.x, size.y), refreshRate);
+        client = new StreamClient(events, decoder, host, key, userAgent(), screenInfo());
         events.client = client;
         client.start();
         if (problem != 0) {
@@ -761,6 +762,54 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
 
     private String userAgent() {
         return "TabScreen app " + VERSION + " (Android " + Build.VERSION.RELEASE + "; " + Build.MANUFACTURER + " " + Build.MODEL + ")";
+    }
+
+    /**
+     * This screen as the Mac needs it to shape the extra display: pixels (landscape), refresh rate, physical size,
+     * a name, and the largest video the hardware decoder handles.
+     */
+    private JSONObject screenInfo() {
+        JSONObject info = new JSONObject();
+        try {
+            DisplayMetrics metrics = new DisplayMetrics();
+            getWindowManager().getDefaultDisplay().getRealMetrics(metrics);
+            int width = Math.max(metrics.widthPixels, metrics.heightPixels);
+            int height = Math.min(metrics.widthPixels, metrics.heightPixels);
+            int refresh = Math.round(refreshRate);
+            info.put("w", width);
+            info.put("h", height);
+            info.put("refresh", refresh);
+            info.put("name", deviceName());
+            float dpi = (metrics.xdpi + metrics.ydpi) / 2;
+            boolean dpiLooksReal = Math.abs(metrics.xdpi - metrics.densityDpi) > 0.5f
+                    || Math.abs(metrics.ydpi - metrics.densityDpi) > 0.5f;   // some devices just repeat the density bucket
+            if (dpi > 50 && dpi < 1000 && dpiLooksReal) {
+                info.put("mmW", Math.round(width / dpi * 25.4f));
+                info.put("mmH", Math.round(height / dpi * 25.4f));
+            }
+            int[] video = VideoDecoder.largestVideo(width, height, refresh);
+            if (video != null) {
+                info.put("maxW", video[0]);
+                info.put("maxH", video[1]);
+                info.put("maxFps", video[2]);
+            }
+        } catch (JSONException ignored) {
+            // only plain values go in
+        }
+        return info;
+    }
+
+    /** The name people know this device by ("Galaxy Tab S10 FE"), or its model. */
+    private String deviceName() {
+        String name = null;
+        try {
+            name = Settings.Global.getString(getContentResolver(), "device_name");
+        } catch (Exception ignored) {
+            // not available on this device
+        }
+        if (name == null || name.trim().isEmpty()) name = Build.MODEL;
+        name = name.trim();
+        return name.length() > 40 ? name.substring(0, 40) : name;
     }
 
     private TextView label(float sizeSp, int color) {

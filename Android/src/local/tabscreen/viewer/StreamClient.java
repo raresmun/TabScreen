@@ -63,9 +63,7 @@ final class StreamClient implements Runnable {
     private final String wifiHost;
     private final String wifiKey;
     private final String userAgent;
-    private final int screenWidth;
-    private final int screenHeight;
-    private final float refreshRate;
+    private final JSONObject screen;   // this tablet's screen, sent to the Mac in "hello" (see MainActivity.screenInfo)
 
     private volatile boolean running = true;
     private volatile Socket connecting;
@@ -76,15 +74,13 @@ final class StreamClient implements Runnable {
     private Thread thread;
 
     StreamClient(Listener listener, VideoDecoder decoder, String wifiHost, String wifiKey, String userAgent,
-                 int screenWidth, int screenHeight, float refreshRate) {
+                 JSONObject screen) {
         this.listener = listener;
         this.decoder = decoder;
         this.wifiHost = wifiHost;
         this.wifiKey = wifiKey;
         this.userAgent = userAgent;
-        this.screenWidth = screenWidth;
-        this.screenHeight = screenHeight;
-        this.refreshRate = refreshRate;
+        this.screen = screen;
     }
 
     void start() {
@@ -210,17 +206,20 @@ final class StreamClient implements Runnable {
         return answered ? STREAMED : UNAVAILABLE;
     }
 
+    /** Introduces this tablet: the Mac shapes the extra display and the video to fit its screen. */
     private JSONObject hello() {
         JSONObject hello = new JSONObject();
         try {
+            java.util.Iterator<String> keys = screen.keys();
+            while (keys.hasNext()) {
+                String key = keys.next();
+                hello.put(key, screen.get(key));
+            }
             hello.put("type", "hello");
             hello.put("mode", "h264");
             hello.put("client", "app");
             hello.put("ua", userAgent);
             hello.put("secure", true);
-            hello.put("w", screenWidth);
-            hello.put("h", screenHeight);
-            hello.put("refresh", Math.round(refreshRate));
         } catch (JSONException ignored) {
             // only plain values go in
         }
