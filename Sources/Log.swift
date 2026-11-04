@@ -1,9 +1,19 @@
 import Foundation
 
-/// Writes TabScreen.log next to TabScreen.app (handy when something goes wrong).
+/// Writes TabScreen.log (handy when something goes wrong): next to TabScreen.app when it was built in the project
+/// folder, otherwise in ~/Library/Logs/TabScreen.
 enum Log {
     private static let queue = DispatchQueue(label: "tabscreen.log")
-    private static let fileURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("TabScreen.log")
+    static let fileURL: URL = {
+        let appFolder = Bundle.main.bundleURL.deletingLastPathComponent()
+        if FileManager.default.fileExists(atPath: appFolder.appendingPathComponent("build.sh").path) {
+            return appFolder.appendingPathComponent("TabScreen.log")
+        }
+        let logFolder = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/TabScreen", isDirectory: true)
+        try? FileManager.default.createDirectory(at: logFolder, withIntermediateDirectories: true)
+        return logFolder.appendingPathComponent("TabScreen.log")
+    }()
     private static let formatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm:ss.SSS"
