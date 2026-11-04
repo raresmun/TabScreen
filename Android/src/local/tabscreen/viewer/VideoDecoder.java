@@ -36,15 +36,17 @@ final class VideoDecoder {
     private static final int MAX_RESTARTS = 8;   // per connection; after that, wait for the next connection
 
     // Low-latency settings, from most to least eager. Some decoders reject or mishandle the eager ones.
-    private static final int TUNING_ALL = 0;        // standard low-latency flag + chip maker's own flag + real-time priority
-    private static final int TUNING_STANDARD = 1;   // standard low-latency flag only (Android 11+)
-    private static final int TUNING_PLAIN = 2;
+    private static final int TUNING_FAST = 0;       // all of the below, plus "run at the screen's full frame rate" (keeps clocks up)
+    private static final int TUNING_ALL = 1;        // standard low-latency flag + chip maker's own flag + real-time priority
+    private static final int TUNING_STANDARD = 2;   // standard low-latency flag only (Android 11+)
+    private static final int TUNING_PLAIN = 3;
 
     /** The settings that worked on this tablet; later decoders start there (remembered while the app runs). */
-    private static volatile int learnedTuning = TUNING_ALL;
+    private static volatile int learnedTuning = TUNING_FAST;
 
     private final Surface surface;
     private final Callback callback;
+    private final int frameRate;   // the screen's refresh rate: the most frames a second worth decoding
     private final Object lock = new Object();
 
     // Guarded by lock
@@ -66,9 +68,10 @@ final class VideoDecoder {
     private volatile int queuedSinceStart;
     private volatile int shownSinceStart;
 
-    VideoDecoder(Surface surface, Callback callback) {
+    VideoDecoder(Surface surface, Callback callback, int frameRate) {
         this.surface = surface;
         this.callback = callback;
+        this.frameRate = Math.max(30, Math.min(frameRate, 240));
     }
 
     /** Sets the decoder up for the Mac's stream format (the avcC record). Returns false if it couldn't. */
@@ -287,7 +290,13 @@ final class VideoDecoder {
         if (level <= TUNING_STANDARD) {
             format.setInteger("low-latency", 1);   // MediaFormat.KEY_LOW_LATENCY (Android 11+)
         }
-        if (level == TUNING_ALL) {
+        if (level == TUNING_FAST) {
+            // Frames often come one at a time (only when the Mac's screen changes); without this hint some decoders
+            // drop to low clock speeds between them and take longer for each one.
+            format.setInteger(MediaFormat.KEY_FRAME_RATE, frameRate);
+            format.setInteger(MediaFormat.KEY_OPERATING_RATE, frameRate);
+        }
+        if (level <= TUNING_ALL) {
             format.setInteger(MediaFormat.KEY_PRIORITY, 0);   // real time
             String lower = name.toLowerCase(Locale.ROOT);
             if (lower.startsWith("c2.exynos") || lower.startsWith("omx.exynos")) {
@@ -304,8 +313,9 @@ final class VideoDecoder {
         return format;
     }
 
-    private static String describe(int level) {
+    private String describe(int level) {
         switch (level) {
+            case TUNING_FAST: return "full low-latency settings, kept at " + frameRate + " fps speed";
             case TUNING_ALL: return "full low-latency settings";
             case TUNING_STANDARD: return "standard low-latency setting";
             default: return "plain settings";

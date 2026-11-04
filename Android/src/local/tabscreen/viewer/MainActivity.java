@@ -166,7 +166,7 @@ public final class MainActivity extends Activity implements SurfaceHolder.Callba
         if (problem == StreamClient.PROBLEM_WRONG_KEY || problem == StreamClient.PROBLEM_BLOCKED) {
             key = null;   // USB only until the key is fixed, so the Mac doesn't count more wrong keys
         }
-        decoder = new VideoDecoder(videoView.getHolder().getSurface(), events);
+        decoder = new VideoDecoder(videoView.getHolder().getSurface(), events, Math.round(refreshRate));
         client = new StreamClient(events, decoder, host, key, userAgent(), screenInfo());
         events.client = client;
         client.start();
