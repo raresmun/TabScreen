@@ -95,11 +95,11 @@ final class USBHelper: @unchecked Sendable {
         connected = ready
         usingApp.formIntersection(ready)
         if !ready.isEmpty {
-            onStatus?(usingApp.isEmpty ? "USB: tablet plugged in (Chrome)" : "USB: tablet plugged in", true)
+            onStatus?(usingApp.isEmpty ? "USB: connected (Chrome)" : "USB: connected", true)
         } else if waitingForApproval {
-            onStatus?("USB: tap “Allow” on the tablet", true)
+            onStatus?("USB: tap “Allow” on the device", true)
         } else {
-            onStatus?("USB: plug in the tablet", true)
+            onStatus?("USB: plug in your tablet or phone", true)
         }
     }
 
