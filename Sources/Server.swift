@@ -14,6 +14,7 @@ final class StreamServer: EncodedFrameSink, @unchecked Sendable {
         var wantsH264 = false
         var wantsJPEG = false
         var missedJPEG = false
+        var logLines = 0
         init(connection: NWConnection) { self.connection = connection }
     }
 
@@ -308,11 +309,21 @@ final class StreamServer: EncodedFrameSink, @unchecked Sendable {
             if type == "key" {
                 client.needsKeyFrame = true
                 requestKeyFrame(force: false)
+            } else if type == "log" {
+                // Notes from the tablet app (which decoder it uses, how fast it runs), kept short and limited.
+                guard client.logLines < 100, let text = message["text"] as? String else { return }
+                client.logLines += 1
+                Log.write("Tablet app: " + String(text.prefix(300)).replacingOccurrences(of: "\n", with: " "))
             } else if type == "hello" {
                 replaceOlderViewers(of: client)
                 let pictureMode = (message["mode"] as? String) == "jpeg"
-                Log.write("Tablet browser: \(message["ua"] ?? "?") – secure page: \(message["secure"] ?? "?")")
-                Log.write("Tablet screen: \(message["w"] ?? "?") x \(message["h"] ?? "?") pixels – \(pictureMode ? "picture mode (plain Wi-Fi page)" : "video mode")")
+                if (message["client"] as? String) == "app" {
+                    Log.write("Tablet app: \(message["ua"] ?? "?")")
+                    Log.write("Tablet screen: \(message["w"] ?? "?") x \(message["h"] ?? "?") pixels at \(message["refresh"] ?? "?") Hz – video mode")
+                } else {
+                    Log.write("Tablet browser: \(message["ua"] ?? "?") – secure page: \(message["secure"] ?? "?")")
+                    Log.write("Tablet screen: \(message["w"] ?? "?") x \(message["h"] ?? "?") pixels – \(pictureMode ? "picture mode (plain Wi-Fi page)" : "video mode")")
+                }
                 if pictureMode {
                     client.wantsJPEG = true
                     updateJPEGDemand()
