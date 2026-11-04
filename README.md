@@ -1,47 +1,89 @@
+<p align="center"><img src="AppIcon.png" width="128" alt="TabScreen icon"></p>
+
 # TabScreen
 
-Turns your Galaxy Tab S10 FE into a real extended display for this Mac.
-macOS sees it as a normal second monitor ("Galaxy Tab" in System Settings → Displays): drag windows onto it,
-arrange it, change its resolution. On the tablet, the TabScreen app shows it full screen.
+Use an Android tablet or phone as a real extra display for your Mac.
 
-## 1. Build and start (on the Mac)
-Double-click **Build and Run.command** in this folder.
-- If it says the developer tools are missing, run `xcode-select --install` in Terminal, then try again.
-- A tablet icon appears in the menu bar. That's TabScreen.
+macOS sees a normal second monitor: drag windows onto it, arrange it in System Settings → Displays, pick its size.
+The Android device shows it full screen in the TabScreen app, over a USB cable (least lag) or over Wi-Fi.
 
-## 2. Allow Screen Recording (first time only)
-TabScreen needs it to send the extra display to the tablet. Turn on **TabScreen** in
-System Settings → Privacy & Security → Screen & System Audio Recording,
-then choose **Restart TabScreen** from the menu bar icon.
-Builds are signed with TabScreen's own local certificate, so the permission stays on after rebuilds.
+- **A real extended display, not mirroring.** TabScreen creates a virtual monitor shaped like your device's screen:
+  its resolution, shape and refresh rate, with sharp (HiDPI) "looks like" sizes.
+- **Low lag.** Hardware H.264 on both sides, tuned for latency: no frame reordering, the decoder's low-latency modes,
+  and every frame shown at the next screen refresh. The mouse pointer is drawn on the device, so it moves instantly.
+- **Plug and play over USB.** Plug the device in and TabScreen installs and opens the app by itself.
+- **Wi-Fi too**, protected by an access key.
+- **Works with most Android devices**: any tablet or phone with Android 8 or newer.
 
-## 3. Connect the tablet with USB (fastest)
-One-time setup on the tablet:
-1. Settings → About tablet → Software information → tap **Build number** 7 times.
+## What you need
+- A Mac with Apple silicon, macOS 13 or newer, and Apple's command line developer tools
+  (run `xcode-select --install` in Terminal if you don't have them).
+- An Android tablet or phone with Android 8 or newer. For USB, a cable that carries data.
+
+## Build and start
+1. Download this repository (green **Code** button → **Download ZIP**) and unzip it, or clone it.
+2. Double-click **Build and Run.command**. A tablet icon appears in the menu bar: that's TabScreen.
+3. When macOS asks, allow Screen Recording for TabScreen (System Settings → Privacy & Security →
+   Screen & System Audio Recording), then choose **Restart TabScreen** from the menu bar icon.
+
+The first build makes a signing certificate that stays on your Mac, so the permission survives later rebuilds.
+
+## Connect over USB (recommended)
+On the Android device, once:
+1. Settings → About → Software information → tap **Build number** 7 times. This turns on Developer options.
 2. Settings → Developer options → turn on **USB debugging**.
-3. If Samsung **Auto Blocker** is on (Settings → Security and privacy), turn it off. It blocks USB commands.
+3. Samsung: turn off **Auto Blocker** (Settings → Security and privacy); it blocks USB commands.
+   Xiaomi: also turn on **Install via USB** in Developer options.
 
-On the Mac: menu bar icon → **Set up USB connection…** (downloads Google's adb tool, about 15 MB).
+On the Mac: menu bar icon → **Set up USB connection…** (downloads Google's `adb` tool, about 15 MB).
 
-Plug the tablet into the Mac with a USB-C cable that carries data, and tap **Allow** when the tablet asks about
-USB debugging. TabScreen installs the **TabScreen app** on the tablet (the first time, and after updates) and opens
-it: your extra screen appears full screen. After that, just plug in the tablet.
+Plug the device in and tap **Allow** when it asks about USB debugging. TabScreen installs the TabScreen app
+(the first time, and after updates) and opens it. From then on, just plug it in.
 
-## Wi-Fi instead of USB (optional)
-Menu bar icon → **Allow Wi-Fi connection**. If the tablet has been plugged in over USB once, the TabScreen app already
-knows the Mac's address and key: open the app and it connects. Otherwise tap **Wi-Fi settings** in the app and type
-the address and key shown in the menu. The key stops other people on the same Wi-Fi from viewing your screen.
-Wi-Fi is switched off again every time TabScreen starts.
+## Wi-Fi
+Menu bar icon → **Allow Wi-Fi connection**. A device that has been connected over USB once already knows the Mac's
+address and key: open the app and it connects. Otherwise tap **Wi-Fi settings** in the app and type the address and
+key shown in the menu. Wi-Fi access switches itself off every time TabScreen starts.
 
-The browser viewer still works as a fallback: open the **Browser** address from the menu in Chrome.
+There's also a browser viewer: open the **Browser** address from the menu in Chrome. Browsers only decode video on
+secure pages, so on plain Wi-Fi it shows pictures instead of video.
 
-## Arrange and size
-- Menu bar icon → **Arrange displays…** and drag the Galaxy Tab to where it sits on your desk.
-- Menu bar icon → **Screen size** to trade bigger text for more space.
+## Adjusting
+- **Screen size**: "looks like" sizes worked out from your device's physical size, from larger text to more space,
+  plus pixel for pixel.
+- **Picture quality**: lighter (slow Wi-Fi), balanced or sharper.
+- **Arrange displays…**: put the extra display where the device sits on your desk.
 
-## The tablet app
-`Android/` holds its source. `Android/TabScreen.apk` is built on Linux with `Android/build-apk.sh`
-(no Android Studio needed). Keep `Android/signing/`: updates must be signed with the same key to install over the app.
+The extra display takes the shape of whichever device connects, and your choices are remembered for each device.
+For the smoothest picture, set the device to its highest refresh rate (Samsung: Settings → Display →
+Motion smoothness → Adaptive).
+
+## How it works
+- `Sources/` is the Mac app, in Swift. It makes the extra display with macOS's private `CGVirtualDisplay` API
+  (the one DeskPad and BetterDisplay use), captures it with ScreenCaptureKit, encodes it with VideoToolbox in
+  low-latency mode, and sends it through a small HTTP/WebSocket server. Over USB, `adb reverse` lets the device reach
+  the Mac at its own `localhost`.
+- `Android/` is the TabScreen app, in plain Java with no Android Studio: MediaCodec decodes straight onto the screen.
+  `Android/TabScreen.apk` is a ready-made build. To rebuild it, run `Android/build-apk.sh` on Linux (the Debian or
+  Ubuntu packages it needs are listed at the top). It creates its own signing key in `Android/signing/`, which stays
+  out of git.
+- `Resources/viewer.html` is the browser viewer.
+
+## Security
+- In USB mode TabScreen only listens on 127.0.0.1, so nothing on your network can connect.
+- Wi-Fi mode needs the access key; 5 wrong keys block that address for 10 minutes.
+- Only the extra display is sent, never your other screens, and nobody can control the Mac through TabScreen.
+- While the cable is plugged in, other apps on the Android device could also reach TabScreen through adb's tunnel.
+  Only plug in devices you trust.
+
+## Limitations
+- It relies on a private macOS API, so a macOS update could break it.
+- One extra display at a time.
+- No touch input yet: the device is a screen; use the Mac's mouse and keyboard.
 
 ## If something doesn't work
-TabScreen writes `TabScreen.log` in this folder (the tablet app adds notes there too), and the build writes `build.log`.
+TabScreen writes `TabScreen.log` next to the app (the Android app adds notes about its decoder and timing), and the
+build writes `build.log`.
+
+## License
+MIT. See [LICENSE](LICENSE).
