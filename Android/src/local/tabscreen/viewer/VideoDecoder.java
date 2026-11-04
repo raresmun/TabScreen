@@ -369,6 +369,45 @@ final class VideoDecoder {
         }
     }
 
+    /**
+     * The largest video with the screen's shape (and the highest frame rate up to {@code fps}) that this device's
+     * hardware H.264 decoder says it can play: {width, height, fps}. Null if it can't tell.
+     */
+    static int[] largestVideo(int width, int height, int fps) {
+        MediaCodecInfo.VideoCapabilities best = null;
+        try {
+            for (MediaCodecInfo info : new MediaCodecList(MediaCodecList.REGULAR_CODECS).getCodecInfos()) {
+                if (info.isEncoder() || !handlesAvc(info) || isSoftwareOnly(info)) continue;
+                if (info.getName().toLowerCase(Locale.ROOT).contains(".secure")) continue;
+                MediaCodecInfo.CodecCapabilities capabilities = info.getCapabilitiesForType(MIME);
+                if (capabilities.isFeatureRequired(MediaCodecInfo.CodecCapabilities.FEATURE_SecurePlayback)
+                        || capabilities.isFeatureRequired(MediaCodecInfo.CodecCapabilities.FEATURE_TunneledPlayback)) continue;
+                MediaCodecInfo.VideoCapabilities video = capabilities.getVideoCapabilities();
+                if (video == null) continue;
+                if (best == null || capabilities.isFeatureSupported("low-latency")) best = video;   // same choice as decoderNames
+                if (capabilities.isFeatureSupported("low-latency")) break;
+            }
+        } catch (RuntimeException e) {
+            return null;
+        }
+        if (best == null) return null;
+        int[] rates = {fps, 60, 30};
+        double[] scales = {1.0, 0.9, 0.8, 0.75, 2 / 3.0, 0.5};
+        for (int rate : rates) {
+            if (rate > fps && rate != rates[0]) continue;
+            for (double scale : scales) {
+                int w = ((int) Math.round(width * scale)) & ~1;
+                int h = ((int) Math.round(height * scale)) & ~1;
+                try {
+                    if (best.areSizeAndRateSupported(w, h, rate)) return new int[]{w, h, rate};
+                } catch (IllegalArgumentException ignored) {
+                    // not a size this decoder accepts at all
+                }
+            }
+        }
+        return null;
+    }
+
     /** H.264 decoders that can handle the picture size: hardware ones with a low-latency mode first. */
     private static List<String> decoderNames(int width, int height) {
         List<String> lowLatency = new ArrayList<String>();
