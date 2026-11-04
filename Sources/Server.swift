@@ -15,6 +15,7 @@ final class StreamServer: EncodedFrameSink, @unchecked Sendable {
         var wantsJPEG = false
         var missedJPEG = false
         var logLines = 0
+        var canControl = false   // came with the access key, so its touches are taken (see TouchInput)
         init(connection: NWConnection) { self.connection = connection }
     }
 
@@ -24,6 +25,10 @@ final class StreamServer: EncodedFrameSink, @unchecked Sendable {
     var onJPEGNeeded: (@Sendable () -> Void)?
     /// A viewer described its screen (in its "hello"): the extra display can be shaped to fit it.
     var onDeviceScreen: (@Sendable (DeviceScreen) -> Void)?
+    /// A touch from a viewer that has the access key ("mouse" or "scroll"). Called on the server's queue.
+    var onInput: (@Sendable ([String: Any]) -> Void)?
+    /// A viewer went away: let go of anything its touches still hold down. Called on the server's queue.
+    var onInputEnded: (@Sendable () -> Void)?
 
     private let port: UInt16
     private let html: Data
@@ -112,6 +117,7 @@ final class StreamServer: EncodedFrameSink, @unchecked Sendable {
         if client.isViewer {
             Log.write("Tablet disconnected")
             reportViewerCount()
+            onInputEnded?()
         }
         if client.wantsJPEG { updateJPEGDemand() }
     }
@@ -193,6 +199,9 @@ final class StreamServer: EncodedFrameSink, @unchecked Sendable {
         if path == "/auth" {
             respond(client, status: "200 OK", contentType: "text/plain; charset=utf-8", body: Data("ok".utf8))
         } else if path == "/ws", headers["upgrade"]?.lowercased() == "websocket", let key = headers["sec-websocket-key"] {
+            // Over USB the key isn't needed to watch, but it is for touches: other apps on the tablet can reach
+            // TabScreen through adb's tunnel too, and they don't know it.
+            client.canControl = query["k"] == accessKey
             upgradeToWebSocket(client, key: key)
         } else {
             respond(client, status: "404 Not Found", contentType: "text/plain; charset=utf-8", body: Data("Not found".utf8))
@@ -338,6 +347,10 @@ final class StreamServer: EncodedFrameSink, @unchecked Sendable {
                 }
                 if let image = lastCursorImageMessage { sendFrame(to: client, opcode: 0x1, payload: image) }
                 if let position = lastCursorMessage { sendFrame(to: client, opcode: 0x1, payload: position) }
+                sendInputState(to: client)
+            } else if type == "mouse" || type == "scroll" {
+                guard client.isViewer, client.canControl else { return }
+                onInput?(message)
             }
         case 0x8:
             client.connection.cancel()
@@ -453,6 +466,25 @@ final class StreamServer: EncodedFrameSink, @unchecked Sendable {
                 self.sendFrame(to: client, opcode: 0x2, payload: packet)
             }
         }
+    }
+
+    // MARK: - Touch control
+
+    private var inputState = "off"
+
+    /// Tells the tablet whether its touches control the Mac: "on", "off", or "permission" (waiting for macOS).
+    func setInputState(_ state: String) {
+        queue.async {
+            self.inputState = state
+            for client in self.clients.values where client.isViewer {
+                self.sendInputState(to: client)
+            }
+        }
+    }
+
+    private func sendInputState(to client: Client) {
+        let state = client.canControl ? inputState : "nokey"
+        sendFrame(to: client, opcode: 0x1, payload: Data("{\"type\":\"input\",\"touch\":\"\(state)\"}".utf8))
     }
 
     // MARK: - Pointer (drawn by the tablet itself)

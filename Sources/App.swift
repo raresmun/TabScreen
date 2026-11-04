@@ -44,6 +44,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var quality = UserDefaults.standard.object(forKey: "quality") as? Int ?? 1
     private var displayGeneration = 0
     private let accessKey = AppDelegate.loadAccessKey()
+    private let touchInput = TouchInput()
+    private var touchControl = UserDefaults.standard.bool(forKey: "touchControl")   // off until switched on in the menu
+    private var permissionTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Log.reset()
@@ -86,6 +89,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         server.onDeviceScreen = { screen in
             Task { @MainActor in self.deviceConnected(screen) }
         }
+        touchInput.doubleClickInterval = NSEvent.doubleClickInterval
+        server.onInput = { [touchInput] message in touchInput.handle(message) }
+        server.onInputEnded = { [touchInput] in touchInput.reset() }
         capturer.onError = { message in
             Task { @MainActor in self.showProblem(message) }
         }
@@ -107,7 +113,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         usb.start()
         self.usb = usb
 
-        rebuildMenu()
+        updateTouchControl()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -137,6 +143,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if CGPreflightScreenCaptureAccess() { problem = nil }   // earlier capture problems are over
         saveDevice()   // only shapes that worked are remembered
         cursor?.displayID = virtualScreen.displayID
+        touchInput.displayID = virtualScreen.displayID
         applySize(attempt: 0)
         startCapture()
         rebuildMenu()
@@ -168,6 +175,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let generation = displayGeneration
         capturer?.stop()
         cursor?.displayID = 0
+        touchInput.displayID = 0
         virtualScreen.destroy()
         rebuildMenu()
         Task { @MainActor in
@@ -299,6 +307,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         addSubmenu("Picture quality", AppDelegate.qualities.enumerated().map { (title: $0.element.title, tag: $0.offset, on: $0.offset == quality) },
                    #selector(chooseQuality(_:)))
         addAction("Arrange displays…", #selector(openDisplaySettings))
+        let touchItem = NSMenuItem(title: "Touch control", action: #selector(toggleTouchControl), keyEquivalent: "")
+        touchItem.target = self
+        touchItem.state = touchControl ? .on : .off
+        menu.addItem(touchItem)
+        if touchControl && !TouchInput.isAllowed {
+            addAction("⚠️ Allow TabScreen under Accessibility for touch", #selector(openAccessibilitySettings))
+        }
 
         menu.addItem(NSMenuItem.separator())
         let loginItem = NSMenuItem(title: "Open at Login", action: #selector(toggleOpenAtLogin), keyEquivalent: "")
@@ -317,6 +332,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
             NSWorkspace.shared.open(url)
         }
+    }
+
+    @objc private func toggleTouchControl() {
+        touchControl.toggle()
+        UserDefaults.standard.set(touchControl, forKey: "touchControl")
+        Log.write("Touch control: \(touchControl ? "on" : "off")")
+        if touchControl && !TouchInput.isAllowed { TouchInput.askForPermission() }
+        updateTouchControl()
+    }
+
+    @objc private func openAccessibilitySettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// Passes the Touch control setting on to the input and the tablet. While macOS hasn't allowed TabScreen under
+    /// Accessibility yet, checks every moment, so touch starts working as soon as it does.
+    private func updateTouchControl() {
+        let allowed = TouchInput.isAllowed
+        touchInput.isEnabled = touchControl && allowed
+        server?.setInputState(!touchControl ? "off" : allowed ? "on" : "permission")
+        permissionTimer?.invalidate()
+        permissionTimer = nil
+        if touchControl && !allowed {
+            permissionTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { _ in
+                guard TouchInput.isAllowed else { return }
+                Task { @MainActor in
+                    guard self.permissionTimer != nil else { return }
+                    Log.write("Accessibility allowed: touch control works")
+                    self.updateTouchControl()
+                }
+            }
+        }
+        rebuildMenu()
     }
 
     @objc private func openDisplaySettings() {
