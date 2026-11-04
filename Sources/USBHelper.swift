@@ -1,26 +1,36 @@
 import Foundation
+import CryptoKit
 
-/// Uses Google's adb tool to tunnel the tablet's "localhost:7171" to this Mac over the USB cable,
-/// and opens the viewer in Chrome on the tablet as soon as it's plugged in.
+/// Uses Google's adb tool to tunnel the tablet's "localhost:7171" to this Mac over the USB cable.
+/// When the tablet is plugged in, it installs (or updates) the TabScreen app on it and opens it.
+/// If that doesn't work, it opens the viewer page in Chrome instead.
 final class USBHelper: @unchecked Sendable {
     /// (status text for the menu, is the adb helper installed)
     var onStatus: (@Sendable (String, Bool) -> Void)?
 
+    /// The tablet app: Android/TabScreen.apk, copied into TabScreen.app by build.sh.
+    static let tabletAppPackage = "local.tabscreen.viewer"
+    private static let tabletAppActivity = "local.tabscreen.viewer/.MainActivity"
+
     private let port: Int
+    private let accessKey: String
     private let queue = DispatchQueue(label: "tabscreen.usb")
     private var timer: DispatchSourceTimer?
     private var adbPath: String?
     private var connected: Set<String> = []
+    private var usingApp: Set<String> = []
     private var lastForwardRefresh = Date.distantPast
     private var serverStarted = false
+    private lazy var bundledApp: (url: URL, sha256: String)? = USBHelper.loadBundledApp()
 
     static var helperDirectory: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/TabScreen", isDirectory: true)
     }
 
-    init(port: Int) {
+    init(port: Int, accessKey: String) {
         self.port = port
+        self.accessKey = accessKey
     }
 
     static func findADB() -> String? {
@@ -67,9 +77,14 @@ final class USBHelper: @unchecked Sendable {
         }
         let newlyConnected = ready.subtracting(connected)
         for serial in newlyConnected {
-            run(adb, ["-s", serial, "reverse", "tcp:\(port)", "tcp:\(port)"])
-            openViewer(adb: adb, serial: serial)
             Log.write("Tablet \(serial) plugged in over USB")
+            run(adb, ["-s", serial, "reverse", "tcp:\(port)", "tcp:\(port)"])
+            if prepareTabletApp(adb: adb, serial: serial) && openTabletApp(adb: adb, serial: serial) {
+                usingApp.insert(serial)
+            } else {
+                usingApp.remove(serial)
+                openBrowserViewer(adb: adb, serial: serial)
+            }
         }
         if Date().timeIntervalSince(lastForwardRefresh) > 15 {
             lastForwardRefresh = Date()
@@ -78,8 +93,9 @@ final class USBHelper: @unchecked Sendable {
             }
         }
         connected = ready
+        usingApp.formIntersection(ready)
         if !ready.isEmpty {
-            onStatus?("USB: tablet plugged in", true)
+            onStatus?(usingApp.isEmpty ? "USB: tablet plugged in (Chrome)" : "USB: tablet plugged in", true)
         } else if waitingForApproval {
             onStatus?("USB: tap “Allow” on the tablet", true)
         } else {
@@ -87,7 +103,62 @@ final class USBHelper: @unchecked Sendable {
         }
     }
 
-    private func openViewer(adb: String, serial: String) {
+    // MARK: - The TabScreen app on the tablet
+
+    /// Makes sure the tablet has this exact version of the TabScreen app. Returns false if it couldn't be installed.
+    private func prepareTabletApp(adb: String, serial: String) -> Bool {
+        guard let app = bundledApp else {
+            Log.write("TabScreen.apk isn't inside TabScreen.app – using Chrome on the tablet")
+            return false
+        }
+        if installedAppHash(adb: adb, serial: serial) == app.sha256 { return true }
+        onStatus?("USB: installing the TabScreen app on the tablet…", true)
+        Log.write("Installing the TabScreen app on the tablet (confirm on the tablet if it asks)")
+        var result = run(adb, ["-s", serial, "install", "-r", app.url.path], timeout: 180)
+        if !result.output.contains("Success")
+            && (result.output.contains("INSTALL_FAILED_UPDATE_INCOMPATIBLE") || result.output.contains("signatures do not match")) {
+            // A copy signed with a different key is in the way: replace it.
+            run(adb, ["-s", serial, "uninstall", USBHelper.tabletAppPackage], timeout: 60)
+            result = run(adb, ["-s", serial, "install", app.url.path], timeout: 180)
+        }
+        if result.status == 0 && result.output.contains("Success") {
+            Log.write("TabScreen app installed on the tablet")
+            return true
+        }
+        let reason = result.output.split(whereSeparator: { $0.isNewline }).last.map(String.init) ?? "no answer from the tablet"
+        Log.write("Couldn't install the TabScreen app (\(reason)) – using Chrome on the tablet")
+        return false
+    }
+
+    /// SHA-256 of the TabScreen app installed on the tablet, or nil if it isn't installed.
+    private func installedAppHash(adb: String, serial: String) -> String? {
+        let paths = run(adb, ["-s", serial, "shell", "pm", "path", USBHelper.tabletAppPackage]).output
+        let lines = paths.split(whereSeparator: { $0.isNewline }).map { $0.trimmingCharacters(in: .whitespaces) }
+        guard let line = lines.first(where: { $0.hasPrefix("package:") && $0.hasSuffix("/base.apk") }) else { return nil }
+        let path = String(line.dropFirst("package:".count))
+        let output = run(adb, ["-s", serial, "shell", "sha256sum", path]).output
+        guard let hash = output.split(whereSeparator: { $0 == " " || $0.isNewline }).first, hash.count == 64 else { return nil }
+        return hash.lowercased()
+    }
+
+    /// Opens the app. It also gets the Mac's Wi-Fi address and key, so it can connect over Wi-Fi later
+    /// (when "Allow Wi-Fi connection" is on) without typing anything.
+    private func openTabletApp(adb: String, serial: String) -> Bool {
+        var arguments = ["-s", serial, "shell", "am", "start", "-n", USBHelper.tabletAppActivity]
+        if let ip = lanIPv4() {
+            arguments += ["--es", "wifiHost", ip, "--es", "wifiKey", accessKey]
+        }
+        let result = run(adb, arguments)
+        if result.status == 0 && !result.output.contains("Error") {
+            Log.write("Opened the TabScreen app on the tablet")
+            return true
+        }
+        Log.write("Couldn't open the TabScreen app on the tablet")
+        return false
+    }
+
+    /// Fallback: the viewer page in Chrome.
+    private func openBrowserViewer(adb: String, serial: String) {
         let url = "http://localhost:\(port)/"
         // The application id makes Chrome reuse its TabScreen tab instead of opening a new one every time.
         let reuseTab = ["--es", "com.android.browser.application_id", "tabscreen"]
@@ -96,6 +167,15 @@ final class USBHelper: @unchecked Sendable {
             run(adb, ["-s", serial, "shell", "am", "start", "-a", "android.intent.action.VIEW", "-d", url] + reuseTab)
         }
     }
+
+    private static func loadBundledApp() -> (url: URL, sha256: String)? {
+        guard let url = Bundle.main.url(forResource: "TabScreen", withExtension: "apk"),
+              let data = try? Data(contentsOf: url) else { return nil }
+        let hash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        return (url, hash)
+    }
+
+    // MARK: - adb
 
     /// Downloads Google's platform-tools (which contain adb) into ~/Library/Application Support/TabScreen.
     func installHelper(completion: @escaping @Sendable (Bool, String) -> Void) {

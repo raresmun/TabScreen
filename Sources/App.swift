@@ -101,7 +101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.cursor = cursor
         if let ip = lanIPv4() { Log.write("Mac address for the tablet: http://\(ip):\(serverPort)") }
 
-        let usb = USBHelper(port: Int(serverPort))
+        let usb = USBHelper(port: Int(serverPort), accessKey: accessKey)
         usb.onStatus = { text, installed in
             Task { @MainActor in self.usbStatusChanged(text, installed: installed) }
         }
@@ -191,9 +191,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         wifiItem.state = wifiEnabled ? .on : .off
         menu.addItem(wifiItem)
         if wifiEnabled {
-            if let address = wifiAddress() {
-                addInfo("On the tablet open: \(address)")
-                addAction("Copy Wi-Fi address", #selector(copyWifiAddress))
+            if let ip = lanIPv4(), let address = wifiAddress() {
+                addInfo("Tablet app: Mac address \(ip), key \(accessKey)")
+                addInfo("Browser: \(address)")
+                addAction("Copy browser address", #selector(copyWifiAddress))
             } else {
                 addInfo("Not connected to a Wi-Fi network")
             }
