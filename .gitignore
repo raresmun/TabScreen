@@ -1,6 +1,7 @@
-# Built app and build output
+# Built app and build output, and the release files from Make DMG.command
 TabScreen.app/
 build/
+dist/
 *.log
 .DS_Store
 
