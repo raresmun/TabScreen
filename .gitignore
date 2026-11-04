@@ -1,0 +1,13 @@
+# Built app and build output
+TabScreen.app/
+build/
+*.log
+.DS_Store
+
+# The tablet app's build output and its private signing key: never publish the key
+Android/out/
+Android/signing/
+Android/*.idsig
+
+# Scratch file from Make Icon.command
+icon-source.png
