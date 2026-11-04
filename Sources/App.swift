@@ -1,4 +1,5 @@
 import AppKit
+import ServiceManagement
 
 /// Port used for the viewer page and the video stream.
 let serverPort: UInt16 = 7171
@@ -300,6 +301,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         addAction("Arrange displays…", #selector(openDisplaySettings))
 
         menu.addItem(NSMenuItem.separator())
+        let loginItem = NSMenuItem(title: "Open at Login", action: #selector(toggleOpenAtLogin), keyEquivalent: "")
+        loginItem.target = self
+        loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        menu.addItem(loginItem)
+        addAction("Show Log File", #selector(showLogFile))
+        addAction("About TabScreen", #selector(showAbout))
         addAction("Quit TabScreen", #selector(quit), key: "q")
         statusItem?.menu = menu
     }
@@ -324,6 +331,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         process.arguments = ["-c", "sleep 1; /usr/bin/open \"$0\"", Bundle.main.bundlePath]
         try? process.run()
         NSApp.terminate(nil)
+    }
+
+    @objc private func toggleOpenAtLogin() {
+        let service = SMAppService.mainApp
+        do {
+            if service.status == .enabled {
+                try service.unregister()
+                Log.write("Open at Login: off")
+            } else {
+                try service.register()
+                Log.write("Open at Login: on")
+            }
+        } catch {
+            Log.write("Open at Login couldn't be changed: \(error.localizedDescription)")
+        }
+        if service.status == .requiresApproval {
+            SMAppService.openSystemSettingsLoginItems()   // switched off in Login Items before: let the user allow it
+        }
+        rebuildMenu()
+    }
+
+    @objc private func showLogFile() {
+        NSWorkspace.shared.activateFileViewerSelecting([Log.fileURL])
+    }
+
+    @objc private func showAbout() {
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.orderFrontStandardAboutPanel(nil)
     }
 
     @objc private func toggleWifi() {
