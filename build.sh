@@ -1,5 +1,5 @@
 #!/bin/bash
-# Builds TabScreen.app in this folder. Everything printed is also saved to build.log.
+# Builds TabScreen.app in this folder (or where TABSCREEN_APP says). Everything printed is also saved to build.log.
 set -eo pipefail
 cd "$(dirname "$0")"
 exec > >(tee build.log) 2>&1
@@ -14,7 +14,7 @@ fi
 sw_vers || true
 xcrun swiftc --version || true
 
-APP="TabScreen.app"
+APP="${TABSCREEN_APP:-TabScreen.app}"
 REBUILD=0
 if [ -f "$APP/Contents/MacOS/TabScreen" ]; then REBUILD=1; fi
 
